@@ -104,15 +104,19 @@ impl SingleInstructionPipeline {
             #[cfg(feature = "prometheus")]
             metrics::increment_processed_updates(&res, metrics::UpdateType::Instruction);
 
-            match res {
-                Ok(()) => (),
-                Err(PipelineErrors::AlreadyHandled(h)) => h.as_unit(),
-                Err(e) => {
-                    let handled = e.handle::<InstructionUpdate>(&pipe.id());
-
-                    return Err(PipelineErrors::AlreadyHandled(handled));
-                },
+            if let Err(e) = res {
+                let _ = e.handle::<InstructionUpdate>(&pipe.id());
             }
+
+            // match res {
+            //     Ok(()) => (),
+            //     Err(PipelineErrors::AlreadyHandled(h)) => h.as_unit(),
+            //     Err(e) => {
+            //         let handled = e.handle::<InstructionUpdate>(&pipe.id());
+
+            //         return Err(PipelineErrors::AlreadyHandled(handled));
+            //     },
+            // }
         }
 
         Ok(())
