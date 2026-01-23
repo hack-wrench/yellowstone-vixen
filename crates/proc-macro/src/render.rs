@@ -319,6 +319,11 @@ fn render_account_parser(
                 #account_enum_ident::try_unpack(&inner.data)
             }
         }
+
+        impl ProgramParser for AccountParser {
+            #[inline]
+            fn program_id(&self) -> Pubkey { ID }
+        }
     }
 }
 
@@ -488,6 +493,11 @@ fn render_instruction_parser(
                     "Invalid Instruction discriminator".to_owned(),
                 ))
             }
+        }
+
+        impl ProgramParser for InstructionParser {
+            #[inline]
+            fn program_id(&self) -> Pubkey { ID }
         }
     }
 }
