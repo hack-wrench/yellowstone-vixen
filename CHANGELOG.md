@@ -7,6 +7,10 @@ and adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `shipstern-core`: `TransactionPrefilter::token_accounts` and `PrefilterBuilder::transaction_token_accounts` pass Yellowstone's `token_accounts` ([rpcpool/yellowstone-grpc#762](https://github.com/rpcpool/yellowstone-grpc/pull/762)) through; merging disagreeing modes takes the wider one and drops `accounts_exclude`.
+
 ### Changed
 
 - `shipstern-core`: merging two prefilters that name the same comparison, one of them written with a repeat, now keeps the comparison instead of dropping it and widening ([#333](https://github.com/solana-rpc/shipstern/pull/333) by @senzenn).

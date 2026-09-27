@@ -37,7 +37,7 @@ use yellowstone_grpc_proto::geyser::{
     SubscribeRequestFilterBlocksMeta, SubscribeRequestFilterSlots,
     SubscribeRequestFilterTransactions, SubscribeUpdateAccount, SubscribeUpdateAccountInfo,
     SubscribeUpdateBlock, SubscribeUpdateBlockMeta, SubscribeUpdateSlot,
-    SubscribeUpdateTransaction,
+    SubscribeUpdateTransaction, TokenAccountExpansionControlFlag,
 };
 
 pub extern crate bs58;
@@ -405,6 +405,8 @@ pub struct TransactionPrefilter {
     pub vote: Option<bool>,
     /// Receive only the transaction with this signature. `None` receives all.
     pub signature: Option<String>,
+    /// Also match the account sets against token-balance owners. `None` matches account keys only.
+    pub token_accounts: Option<TokenAccounts>,
     /// Filter by transaction success/failure status.
     /// - `None`: Include all transactions (required for "any" filter in Richat)
     /// - `Some(false)`: Only successful transactions (default)
@@ -418,9 +420,10 @@ impl Default for TransactionPrefilter {
             accounts_include: HashSet::new(),
             accounts_exclude: HashSet::new(),
             accounts_required: HashSet::new(),
-            vote: None,          // Receive vote and non-vote alike, as before
-            signature: None,     // No single-signature narrowing, as before
-            failed: Some(false), // Default to successful transactions (keep original behaviour)
+            vote: None,           // Receive vote and non-vote alike, as before
+            signature: None,      // No single-signature narrowing, as before
+            token_accounts: None, // Match account keys only, as before
+            failed: Some(false),  // Default to successful transactions (keep original behaviour)
         }
     }
 }
@@ -435,6 +438,7 @@ impl TransactionPrefilter {
             accounts_required,
             vote,
             signature,
+            token_accounts,
             failed,
         } = self;
 
@@ -455,6 +459,18 @@ impl TransactionPrefilter {
             *signature = None;
         }
 
+        // The wider mode also widens what exclude drops, so on disagreement
+        //  the exclude set goes rather than drop what the narrower side receives.
+        if *token_accounts != other.token_accounts {
+            *token_accounts = match (*token_accounts, other.token_accounts) {
+                (Some(TokenAccounts::All), _) | (_, Some(TokenAccounts::All)) => {
+                    Some(TokenAccounts::All)
+                },
+                _ => Some(TokenAccounts::BalanceChanged),
+            };
+            accounts_exclude.clear();
+        }
+
         // The union of two success/failure filters accepts everything the two
         //  accept together. Only when both sides agree on a concrete value does
         //  that value survive; any disagreement (or an existing "any" filter)
@@ -464,6 +480,15 @@ impl TransactionPrefilter {
             _ => None,
         };
     }
+}
+
+/// Which token-balance owners a transaction prefilter also matches its account sets against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenAccounts {
+    /// Every owner of a pre or post token balance.
+    All,
+    /// Only owners whose balance changed or whose token account closed.
+    BalanceChanged,
 }
 
 /// A prefilter for matching block metadata updates.
@@ -1134,6 +1159,8 @@ pub struct PrefilterBuilder {
     transaction_vote: Option<bool>,
     /// Matching [`TransactionPrefilter::signature`]
     transaction_signature: Option<String>,
+    /// Matching [`TransactionPrefilter::token_accounts`]
+    transaction_token_accounts: Option<TokenAccounts>,
     /// Matching [`SlotPrefilter::interslot_updates`]
     slot_interslot_updates: Option<bool>,
     /// Matching [`TransactionPrefilter::accounts_include`]
@@ -1187,6 +1214,7 @@ impl PrefilterBuilder {
             transaction_accounts_exclude,
             transaction_vote,
             transaction_signature,
+            transaction_token_accounts,
             slot_interslot_updates,
         } = self;
         if let Some(err) = error {
@@ -1206,6 +1234,7 @@ impl PrefilterBuilder {
             accounts_required: transaction_accounts_required.unwrap_or_default(),
             vote: transaction_vote,
             signature: transaction_signature,
+            token_accounts: transaction_token_accounts,
             ..Default::default()
         };
 
@@ -1357,6 +1386,18 @@ impl PrefilterBuilder {
                 &mut this.transaction_signature,
                 "transaction_signature",
                 signature.into(),
+            )
+        })
+    }
+
+    /// Also match the transaction account sets against token-balance owners, so a
+    /// wallet matches transfers through its token accounts without listing them.
+    pub fn transaction_token_accounts(self, mode: TokenAccounts) -> Self {
+        self.mutate(|this| {
+            set_opt(
+                &mut this.transaction_token_accounts,
+                "transaction_token_accounts",
+                mode,
             )
         })
     }
@@ -1607,6 +1648,15 @@ impl From<LamportsCmp> for wire_lamports::Cmp {
     }
 }
 
+impl From<TokenAccounts> for TokenAccountExpansionControlFlag {
+    fn from(value: TokenAccounts) -> Self {
+        match value {
+            TokenAccounts::All => Self::All,
+            TokenAccounts::BalanceChanged => Self::BalanceChanged,
+        }
+    }
+}
+
 impl From<&AccountFilter> for SubscribeRequestFilterAccountsFilter {
     fn from(value: &AccountFilter) -> Self {
         let filter = match value {
@@ -1701,7 +1751,9 @@ impl From<Filters> for SubscribeRequest {
                             .iter()
                             .map(ToString::to_string)
                             .collect(),
-                        token_accounts: None,
+                        token_accounts: v
+                            .token_accounts
+                            .map(|m| TokenAccountExpansionControlFlag::from(m).into()),
                     }))
                 })
                 .collect(),
@@ -1987,6 +2039,17 @@ mod tests {
     }
 
     #[test]
+    fn transaction_token_accounts_reaches_the_request() {
+        for (mode, wire) in [(TokenAccounts::All, 0), (TokenAccounts::BalanceChanged, 1)] {
+            let p = Prefilter::builder()
+                .transaction_token_accounts(mode)
+                .build();
+            let wired = one(p.expect("prefilter must build")).transactions["p"].token_accounts;
+            assert_eq!(wired, Some(wire), "{mode:?}");
+        }
+    }
+
+    #[test]
     fn interslot_updates_reaches_the_request() {
         let prefilter = Prefilter::builder()
             .slots()
@@ -2052,6 +2115,7 @@ mod tests {
 
         assert_eq!(transactions.vote, None);
         assert_eq!(transactions.signature, None);
+        assert_eq!(transactions.token_accounts, None);
         assert!(transactions.account_exclude.is_empty());
 
         assert_eq!(
@@ -2420,6 +2484,26 @@ mod tests {
             HashSet::from([Pubkey::new([2; 32])]),
             "only a key both sides exclude stays excluded"
         );
+    }
+
+    #[test]
+    fn merging_token_accounts() {
+        use TokenAccounts::{All, BalanceChanged};
+        let with = |mode| TransactionPrefilter {
+            accounts_exclude: HashSet::from([Pubkey::new([2; 32])]),
+            token_accounts: mode,
+            ..Default::default()
+        };
+        for (lhs, rhs, merged, excluded) in [
+            (Some(All), Some(All), Some(All), 1),
+            (None, Some(BalanceChanged), Some(BalanceChanged), 0),
+            (Some(BalanceChanged), Some(All), Some(All), 0),
+        ] {
+            let mut a = with(lhs);
+            a.merge(with(rhs));
+            let got = (a.token_accounts, a.accounts_exclude.len());
+            assert_eq!(got, (merged, excluded), "{lhs:?} + {rhs:?}");
+        }
     }
 
     fn transaction_prefilter(failed: Option<bool>) -> TransactionPrefilter {
