@@ -1,6 +1,6 @@
 //! Pass-through subscription parsers for TransactionUpdate and AccountUpdate.
 //!
-//! TransactionSubscription: Forwards transaction updates as-is so the Vixen Runtime routes them
+//! TransactionSubscription: Forwards transaction updates as-is so the Shipstern Runtime routes them
 //! to BufferingHandler for eager instruction parsing.
 //!
 //! AccountSubscription: Forwards account updates as-is, subscribing to the union of all
@@ -8,11 +8,11 @@
 
 use std::{borrow::Cow, collections::HashSet};
 
-use yellowstone_vixen_core::{
-    AccountUpdate, ParseResult, Parser, Prefilter, TransactionPrefilter, TransactionUpdate,
+use shipstern_core::{
+    AccountUpdate, ParseResult, Parser, Prefilter, Pubkey, TransactionPrefilter, TransactionUpdate,
 };
 
-use crate::{sink::KafkaSink, Pubkey};
+use crate::sink::KafkaSink;
 
 /// Pass-through subscription for transaction updates.
 /// Subscribes to all transactions and forwards them as-is.
@@ -36,11 +36,13 @@ impl Parser for TransactionSubscription {
             }),
             ..Default::default()
         };
+
         tracing::info!(
             parser_id = %self.id(),
             has_transaction_filter = prefilter.transaction.is_some(),
             "TransactionSubscription prefilter created - receiving all transactions"
         );
+
         prefilter
     }
 
@@ -65,6 +67,7 @@ impl AccountSubscription {
         if !sink.has_account_parsers() {
             return None;
         }
+
         let owners: Vec<Pubkey> = sink
             .account_parsers()
             .iter()
@@ -72,6 +75,7 @@ impl AccountSubscription {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
+
         Some(Self { owners })
     }
 
@@ -96,6 +100,7 @@ impl Parser for AccountSubscription {
             owner_count = self.owners.len(),
             "AccountSubscription prefilter created"
         );
+
         prefilter
     }
 

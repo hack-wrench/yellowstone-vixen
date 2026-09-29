@@ -6,7 +6,8 @@ pub struct RawInstructionEvent {
     pub slot: u64,
     /// Transaction signature (base58).
     pub signature: String,
-    /// Instruction index (e.g., "0.1.2").
+    /// Instruction index. CPI instructions use the flat inner-instruction
+    /// ordinal under their outer instruction (for example, "3.7").
     pub ix_index: String,
     /// Program ID (base58).
     pub program_id: String,
@@ -20,6 +21,8 @@ pub struct RawAccountEvent {
     pub slot: u64,
     /// Account pubkey (base58).
     pub pubkey: String,
+    /// Geyser write version for deterministic ordering.
+    pub write_version: u64,
     /// Owner program ID (base58).
     pub owner: String,
     /// Raw account data (base58).
@@ -122,7 +125,7 @@ pub struct PreparedRecord {
     /// Fallback records use plain JSON payloads.
     pub payload: Vec<u8>,
     /// Unique key for deduplication.
-    /// Instructions: `{slot}:{signature}:{ix_index}`, Accounts: `{slot}:{pubkey}`.
+    /// Instructions: `{slot}:{signature}:{ix_index}`, Accounts: `{slot}:{pubkey}:{write_version}`.
     pub key: String,
     /// Kafka headers for metadata (readable without decoding payload).
     pub headers: Vec<RecordHeader>,

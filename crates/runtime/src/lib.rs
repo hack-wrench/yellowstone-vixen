@@ -9,13 +9,14 @@
 #![warn(clippy::pedantic, missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
-//! Vixen provides a simple API for requesting, parsing, and consuming data
+//! Shipstern provides a simple API for requesting, parsing, and consuming data
 //! from Yellowstone.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
 use config::BufferConfig;
-use tokio::sync::{mpsc, oneshot};
+use shipstern_core::Filters;
+use tokio::sync::{mpsc, oneshot, watch};
 use yellowstone_grpc_proto::tonic::Status;
 
 use crate::sources::SourceExitStatus;
@@ -24,31 +25,36 @@ use crate::sources::SourceExitStatus;
 pub extern crate prometheus;
 #[cfg(feature = "prometheus")]
 pub mod metrics;
+pub extern crate shipstern_core;
 pub extern crate thiserror;
-pub extern crate yellowstone_vixen_core as vixen_core;
-pub use vixen_core::bs58;
+pub use shipstern_core::bs58;
 
 mod buffer;
 pub mod builder;
 pub mod config;
+mod handle;
 pub mod handler;
 pub mod instruction;
 
 pub mod sources;
 
-/// Utility functions for the Vixen runtime.
+/// Utility functions for the Shipstern runtime.
 pub mod util;
 
 pub mod filter_pipeline;
 
+pub use handle::{FilterUpdateError, RuntimeHandle};
 pub use handler::{Handler, HandlerResult, Pipeline};
+pub use shipstern_core::CommitmentLevel;
 pub use util::*;
 use yellowstone_grpc_proto::geyser::SubscribeUpdate;
-pub use yellowstone_vixen_core::CommitmentLevel;
 
-use crate::{builder::RuntimeBuilder, sources::SourceTrait};
+use crate::{
+    builder::RuntimeBuilder,
+    sources::{FilterUpdateSource, SourceTrait},
+};
 
-/// An error thrown by the Vixen runtime.
+/// An error thrown by the Shipstern runtime.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A system I/O error.
@@ -77,12 +83,14 @@ pub enum Error {
     Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 
-/// The main runtime for Vixen.
+/// The main runtime for Shipstern.
 #[derive(Debug)]
 pub struct Runtime<S: SourceTrait> {
     buffer: BufferConfig,
     source: S::Config,
     pipelines: handler::PipelineSets,
+    filter_updates_rx: watch::Receiver<Filters>,
+    filter_state: Arc<handle::FilterState>,
     #[cfg(feature = "prometheus")]
     metrics_registry: prometheus::Registry,
     _source: PhantomData<S>,
@@ -92,21 +100,47 @@ impl<S: SourceTrait> Runtime<S> {
     /// Create a new runtime builder.
     pub fn builder() -> RuntimeBuilder<S> { RuntimeBuilder::<S>::default() }
 }
+
+impl<S: FilterUpdateSource> Runtime<S> {
+    /// Create a handle for changing this runtime's subscription once it is
+    /// running.
+    ///
+    /// Only available when the source implements [`FilterUpdateSource`], so a
+    /// runtime whose source cannot change its subscription has no handle to
+    /// take. [`Self::run`], [`Self::try_run`], [`Self::run_async`] and
+    /// [`Self::try_run_async`] all consume the runtime, so take the handle
+    /// first. Every handle shares one view of the filters.
+    ///
+    /// ```rust, ignore
+    /// let runtime = Runtime::<YellowstoneGrpcSource>::builder()
+    ///     .account(Pipeline::new(TokenProgramAccParser, [Handler]))
+    ///     .try_build(config)?;
+    ///
+    /// let handle = runtime.handle();
+    /// tokio::spawn(runtime.run_async());
+    ///
+    /// handle.update_filters(|filters| filters.merge(TokenProgramAccParser.id(), extra_owner))?;
+    /// ```
+    ///
+    #[must_use]
+    pub fn handle(&self) -> RuntimeHandle { RuntimeHandle::new(Arc::clone(&self.filter_state)) }
+}
+
 impl<S: SourceTrait> Runtime<S> {
-    /// Create a new Tokio runtime and run the Vixen runtime within it,
+    /// Create a new Tokio runtime and run the Shipstern runtime within it,
     /// terminating the current process if the runtime crashes.
     ///
     /// For error handling, use the recoverable variant [`Self::try_run`].
     ///
     /// If you want to provide your own tokio Runtime because you need to run
-    /// async code outside of the Vixen runtime, use the [`Self::run_async`]
+    /// async code outside of the Shipstern runtime, use the [`Self::run_async`]
     /// method.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use yellowstone_vixen::Pipeline;
-    /// use yellowstone_vixen_spl_token_parser::{AccountParser, InstructionParser};
+    /// use shipstern::Pipeline;
+    /// use shipstern_spl_token_parser::{AccountParser, InstructionParser};
     ///
     /// // MyHandler is a handler that implements the Handler trait
     /// // NOTE: The main function is not async
@@ -132,19 +166,19 @@ impl<S: SourceTrait> Runtime<S> {
             .block_on(self.try_run_async())
     }
 
-    /// Run the Vixen runtime asynchronously, terminating the current process
+    /// Run the Shipstern runtime asynchronously, terminating the current process
     /// if the runtime crashes.
     ///
     /// For error handling, use the recoverable variant [`Self::try_run_async`].
     ///
-    /// If you don't need to run any async code outside the Vixen runtime, you
+    /// If you don't need to run any async code outside the Shipstern runtime, you
     /// can use the [`Self::run`] method instead, which takes care of creating
     /// a tokio Runtime for you.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use yellowstone_vixen_parser::{
+    /// use shipstern_parser::{
     ///     token_extension_program::{
     ///         AccountParser as TokenExtensionProgramAccParser,
     ///         InstructionParser as TokenExtensionProgramIxParser,
@@ -224,7 +258,7 @@ impl<S: SourceTrait> Runtime<S> {
     /// │   (finite src)  (unexpected)        (gRPC)        (other)           │
     /// │        │              │               │              │              │
     /// │        ▼              ▼               ▼              ▼              │
-    /// │      Ok(())      ServerHangup     ServerHangup     Other            │
+    /// │   drain -> Ok    ServerHangup     ServerHangup     Other            │
     /// │                                                                     │
     /// │    ┌──────────────────────────────────────────────────────────┐     │
     /// │    │ ReceiverDropped: defensive only - normally unreachable   │     │
@@ -249,12 +283,26 @@ impl<S: SourceTrait> Runtime<S> {
         #[cfg(feature = "prometheus")]
         metrics::register_metrics(&self.metrics_registry);
 
-        let filters = self.pipelines.filters();
+        let mut filter_updates_rx = self.filter_updates_rx;
+
+        // Seed the initial subscribe from the latest set rather than the
+        // registered one, so an update sent between `handle()` and here is part
+        // of the first request instead of a second one that leaves the wider
+        // set live in between. Marking it seen stops the source resending the
+        // set it just subscribed with.
+        let filters = filter_updates_rx.borrow_and_update().clone();
 
         let source = S::new(self.source, filters);
 
+        // Release the runtime's own reference so the slot closes once every
+        // handle is gone, and a source that waits on updates is not left
+        // waiting on a sender that can never produce one.
+        drop(self.filter_state);
+
         tokio::spawn(async move {
-            let _ = source.connect(tx, status_tx).await;
+            let _ = source
+                .connect_with_filter_updates(tx, status_tx, filter_updates_rx)
+                .await;
         });
 
         let signal;
@@ -308,11 +356,10 @@ impl<S: SourceTrait> Runtime<S> {
             status = status_rx => StopType::SourceExit(status),
         };
 
-        let should_stop_buffer = !matches!(stop_ty, StopType::Buffer(..));
-
         match stop_ty {
             StopType::Signal(Ok(Some(s))) => {
                 tracing::warn!("{s:?} received, shutting down...");
+                Self::force_stop_buffer(buffer).await;
                 Ok(())
             },
             StopType::Signal(Ok(None)) => Err(std::io::Error::new(
@@ -325,11 +372,12 @@ impl<S: SourceTrait> Runtime<S> {
             StopType::SourceExit(Ok(status)) => match status {
                 SourceExitStatus::ReceiverDropped => {
                     tracing::info!("Source stopped: receiver dropped (shutdown)");
+                    Self::force_stop_buffer(buffer).await;
                     Ok(())
                 },
                 SourceExitStatus::Completed => {
-                    tracing::info!("Source completed successfully");
-                    Ok(())
+                    tracing::info!("Source completed successfully; draining runtime buffer");
+                    buffer.wait_for_stop().await
                 },
                 SourceExitStatus::StreamEnded => {
                     tracing::warn!("Source stopped: stream ended unexpectedly");
@@ -337,7 +385,7 @@ impl<S: SourceTrait> Runtime<S> {
                 },
                 SourceExitStatus::StreamError { code, message } => {
                     tracing::error!(?code, %message, "Source stopped: stream error");
-                    Err(Error::ServerHangup)
+                    Err(Error::YellowstoneStatus(Status::new(code, message)))
                 },
                 SourceExitStatus::Error(msg) => {
                     tracing::error!(%msg, "Source stopped: error");
@@ -350,14 +398,10 @@ impl<S: SourceTrait> Runtime<S> {
             },
         }?;
 
-        if should_stop_buffer {
-            Self::stop_buffer(buffer).await;
-        }
-
         Ok(())
     }
 
-    async fn stop_buffer(buffer: buffer::Buffer) {
+    async fn force_stop_buffer(buffer: buffer::Buffer) {
         match buffer.join().await {
             Err(e) => tracing::warn!(err = %Chain(&e), "Error stopping runtime buffer"),
             Ok(c) => c.as_unit(),
@@ -365,5 +409,7 @@ impl<S: SourceTrait> Runtime<S> {
     }
 }
 
+#[cfg(test)]
+mod load_tests;
 #[cfg(test)]
 mod runtime_tests;

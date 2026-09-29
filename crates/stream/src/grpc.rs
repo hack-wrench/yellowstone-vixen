@@ -1,13 +1,9 @@
 use std::{collections::HashMap, future::Future, mem, pin::Pin, task::Poll};
 
 use futures_util::pin_mut;
-use tokio::{
-    sync::broadcast,
-    task::{JoinError, JoinHandle},
-};
-use yellowstone_vixen::{stop, Handler, HandlerResult};
-use yellowstone_vixen_core::KeyBytes;
-use yellowstone_vixen_proto::{
+use shipstern::{stop, Handler, HandlerResult};
+use shipstern_core::Pubkey;
+use shipstern_proto::{
     prost::{Message, Name},
     prost_types::Any,
     stream::{
@@ -17,6 +13,10 @@ use yellowstone_vixen_proto::{
     },
     tonic::{self, transport, Request, Response, Status},
     tonic_reflection,
+};
+use tokio::{
+    sync::broadcast,
+    task::{JoinError, JoinHandle},
 };
 
 use super::config::GrpcConfig;
@@ -40,7 +40,7 @@ impl<T: Message + Name + Sync, R: Sync> Handler<T, R> for GrpcHandler {
 }
 
 pub type Receiver = broadcast::Receiver<Any>;
-pub type Channels<V = Box<[Receiver]>> = HashMap<KeyBytes<32>, V>;
+pub type Channels<V = Box<[Receiver]>> = HashMap<Pubkey, V>;
 
 pub(super) struct Service(Channels);
 
@@ -53,8 +53,8 @@ impl ProgramStreams for Service {
         &self,
         request: Request<SubscribeRequest>,
     ) -> Result<Response<Self::SubscribeStream>, Status> {
-        let pubkey: KeyBytes<32> = request.into_inner().program.parse().map_err(
-            |e: yellowstone_vixen_core::KeyFromStrError| {
+        let pubkey: Pubkey = request.into_inner().program.parse().map_err(
+            |e: shipstern_core::KeyFromStrError| {
                 Status::new(tonic::Code::InvalidArgument, e.to_string())
             },
         )?;
@@ -73,15 +73,14 @@ impl ProgramStreams for Service {
         &self,
         request: Request<SubscribeManyRequest>,
     ) -> Result<Response<Self::SubscribeManyStream>, Status> {
-        let pubkeys: Vec<KeyBytes<32>> = request
+        let pubkeys: Vec<Pubkey> = request
             .into_inner()
             .programs
             .iter()
             .map(|p| {
-                p.parse()
-                    .map_err(|e: yellowstone_vixen_core::KeyFromStrError| {
-                        Status::new(tonic::Code::InvalidArgument, e.to_string())
-                    })
+                p.parse().map_err(|e: shipstern_core::KeyFromStrError| {
+                    Status::new(tonic::Code::InvalidArgument, e.to_string())
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 

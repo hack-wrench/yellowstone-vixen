@@ -1,13 +1,17 @@
-//! Builder types for the Vixen runtime and stream server.
-use vixen_core::{
+//! Builder types for the Shipstern runtime and stream server.
+use std::sync::Arc;
+
+use shipstern_core::{
     instruction::InstructionUpdate, AccountUpdate, BlockMetaUpdate, BlockUpdate, SlotUpdate,
     TransactionUpdate,
 };
+use tokio::sync::watch;
 
 use crate::{
-    config::VixenConfig,
+    config::ShipsternConfig,
+    handle::FilterState,
     handler::{BoxPipeline, DynPipeline, PipelineSet, PipelineSets},
-    instruction::SingleInstructionPipeline,
+    instruction::InstructionPipeline,
     sources::SourceTrait,
     util, Runtime,
 };
@@ -18,7 +22,7 @@ pub trait BuilderKind: Default {
     type Error: std::error::Error;
 }
 
-/// An error thrown by the Vixen runtime builder.
+/// An error thrown by the Shipstern runtime builder.
 #[derive(Debug, thiserror::Error)]
 pub enum BuilderError {
     /// Two account pipelines were registered with the same parser ID.
@@ -183,7 +187,7 @@ impl<S: SourceTrait> RuntimeBuilder<S> {
     /// invalid.
     /// # Panics
     /// Only panics if the prometheus metrics registry is not set.
-    pub fn try_build(self, config: VixenConfig<S::Config>) -> Result<Runtime<S>, BuilderError> {
+    pub fn try_build(self, config: ShipsternConfig<S::Config>) -> Result<Runtime<S>, BuilderError> {
         let Self {
             err,
             account,
@@ -199,24 +203,35 @@ impl<S: SourceTrait> RuntimeBuilder<S> {
         } = self;
         let () = err?;
 
-        let VixenConfig {
+        let ShipsternConfig {
             source: source_cfg,
             buffer: buffer_cfg,
         } = config;
 
+        // Bundle every instruction parser into a single InstructionPipeline so
+        // the instruction tree is built once per transaction (one
+        // `build_from_txn`, which clones the transaction and rebuilds the CPI
+        // tree) and then fanned out to all parsers, instead of each parser
+        // rebuilding the whole tree independently (N clones + N rebuilds).
+        //
+        // Bundling collapses per-parser ids into one entry, so the collision
+        // checks below no longer see instruction ids. Warn on duplicates here to
+        // preserve the previous behavior; unlike the other pipeline kinds a
+        // duplicate instruction id is not fatal -- both parsers run.
+        {
+            let mut seen = std::collections::HashSet::new();
+            for id in instruction.iter().map(|ix| ix.id()) {
+                if !seen.insert(id.clone()) {
+                    tracing::warn!(parser = %id, "Duplicate instruction parser ID; both will run");
+                }
+            }
+        }
+
         let mut ixs = PipelineSet::new();
 
-        for ix in instruction {
-            let id = ix.id().into_owned();
-            let pre_existent_parser = ixs.insert(
-                id.clone(),
-                Box::new(SingleInstructionPipeline::new(ix))
-                    as BoxPipeline<'static, TransactionUpdate>,
-            );
-
-            if pre_existent_parser.is_some() {
-                tracing::warn!("Duplicate parser ID detected: {}", id);
-            }
+        if let Some(pipeline) = InstructionPipeline::new(instruction) {
+            let pipeline = Box::new(pipeline) as BoxPipeline<'static, TransactionUpdate>;
+            ixs.insert(pipeline.id().into_owned(), pipeline);
         }
 
         let account_len = account.len();
@@ -254,10 +269,15 @@ impl<S: SourceTrait> RuntimeBuilder<S> {
             return Err(BuilderError::SlotPipelineCollision);
         }
 
+        let (filter_updates_tx, filter_updates_rx) = watch::channel(pipelines.filters());
+        let filter_state = Arc::new(FilterState::new(filter_updates_tx));
+
         Ok(Runtime {
             buffer: buffer_cfg,
             source: source_cfg,
             pipelines,
+            filter_updates_rx,
+            filter_state,
             _source: std::marker::PhantomData,
             #[cfg(feature = "prometheus")]
             metrics_registry,
@@ -269,7 +289,7 @@ impl<S: SourceTrait> RuntimeBuilder<S> {
     /// occurs.
     #[inline]
     #[must_use]
-    pub fn build(self, config: VixenConfig<S::Config>) -> Runtime<S> {
-        util::handle_fatal_msg(self.try_build(config), "Error building Vixen runtime")
+    pub fn build(self, config: ShipsternConfig<S::Config>) -> Runtime<S> {
+        util::handle_fatal_msg(self.try_build(config), "Error building Shipstern runtime")
     }
 }

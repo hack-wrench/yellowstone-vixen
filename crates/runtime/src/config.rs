@@ -1,4 +1,4 @@
-//! Configuration types for the Vixen runtime.
+//! Configuration types for the Shipstern runtime.
 use clap::Args;
 use serde::Deserialize;
 /// A helper trait for types that may or may not have a default value,
@@ -13,9 +13,9 @@ impl<T: Default> MaybeDefault for T {
     fn default_opt() -> Option<Self> { Some(Self::default()) }
 }
 
-/// Root configuration for [the Vixen runtime](crate::Runtime).
+/// Root configuration for [the Shipstern runtime](crate::Runtime).
 #[derive(Debug, Args)]
-pub struct VixenConfig<S>
+pub struct ShipsternConfig<S>
 where S: Args
 {
     /// The source configuration.
@@ -27,7 +27,7 @@ where S: Args
     pub buffer: BufferConfig,
 }
 
-impl<'de, S> Deserialize<'de> for VixenConfig<S>
+impl<'de, S> Deserialize<'de> for ShipsternConfig<S>
 where S: Args + Deserialize<'de>
 {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -46,6 +46,8 @@ where S: Args + Deserialize<'de>
     }
 }
 
+const fn default_sources_channel_size() -> usize { 100 }
+
 /// Job scheduler configuration.
 #[derive(Debug, Clone, Copy, clap::Args, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,8 +57,11 @@ pub struct BufferConfig {
     #[arg(long, env)]
     pub jobs: Option<usize>,
     /// The maximum number of concurrent sources to run.
-    /// Defaults to 100.
-    #[arg(long, env)]
+    ///
+    /// Defaults to 100: a `[buffer]` section omitting this key (including ones
+    /// that predate the field) still deserializes.
+    #[arg(long, env, default_value_t = 100)]
+    #[serde(default = "default_sources_channel_size")]
     pub sources_channel_size: usize,
 }
 
@@ -178,4 +183,42 @@ where T::Owned: Into<U> {
     let ret = f(&mut u);
     *t = u.into();
     ret
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BufferConfig;
+
+    #[test]
+    fn partial_buffer_fills_in_channel_size_default() {
+        let cfg: BufferConfig =
+            serde_json::from_str(r#"{ "jobs": 8 }"#).expect("partial config must deserialize");
+
+        assert_eq!(cfg.sources_channel_size, 100);
+    }
+
+    #[test]
+    fn full_buffer_is_respected() {
+        let cfg: BufferConfig =
+            serde_json::from_str(r#"{ "jobs": 4, "sources-channel-size": 250 }"#).unwrap();
+
+        assert_eq!(cfg.sources_channel_size, 250);
+    }
+
+    /// The clap half of the same gap: without a `default_value_t`, a non-`Option`
+    /// field makes `--sources-channel-size` a required argument.
+    #[test]
+    fn clap_defaults_channel_size_when_flag_is_absent() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Opts {
+            #[command(flatten)]
+            buffer: BufferConfig,
+        }
+
+        let Opts { buffer } = Opts::try_parse_from(["test"]).expect("flag must be optional");
+
+        assert_eq!(buffer.sources_channel_size, 100);
+    }
 }

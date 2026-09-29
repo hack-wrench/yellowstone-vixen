@@ -1,8 +1,8 @@
 use codama_nodes::InstructionNode;
 
 use crate::intermediate_representation::{
-    helpers::build_fields_ir, FieldIr, FieldTypeIr, LabelIr, OneofIr, OneofVariantIr, ScalarIr,
-    SchemaIr, TypeIr, TypeKindIr,
+    helpers::build_fields_ir, FieldIr, FieldTypeIr, LabelIr, OneofIr, OneofVariantIr,
+    OptionEncodingIr, ScalarIr, SchemaIr, TypeIr, TypeKindIr,
 };
 
 ///
@@ -126,17 +126,27 @@ fn build_instruction_messages(ix: &InstructionNode, ir: &mut SchemaIr) {
         .map(|(i, acct)| FieldIr {
             name: crate::utils::to_snake_case(&acct.name),
             tag: (i + 1) as u32,
-            label: LabelIr::Singular,
+            label: if acct.is_optional.unwrap_or(false) {
+                LabelIr::Optional(OptionEncodingIr::default())
+            } else {
+                LabelIr::Singular
+            },
             field_type: FieldTypeIr::Scalar(ScalarIr::PublicKey),
         })
         .collect();
 
-    account_fields.push(FieldIr {
-        name: "remaining_accounts".to_string(),
-        tag: (account_fields.len() + 1) as u32,
-        label: LabelIr::Repeated,
-        field_type: FieldTypeIr::Scalar(ScalarIr::PublicKey),
-    });
+    // Only add `remaining_accounts` if the IDL doesn't already define one.
+    if !account_fields
+        .iter()
+        .any(|f| f.name == "remaining_accounts")
+    {
+        account_fields.push(FieldIr {
+            name: "remaining_accounts".to_string(),
+            tag: (account_fields.len() + 1) as u32,
+            label: LabelIr::Repeated,
+            field_type: FieldTypeIr::Scalar(ScalarIr::PublicKey),
+        });
+    }
 
     // Use `types.push()` instead of `push_unique_type()` because instruction
     // wrapper names (after dropping the `Instruction` suffix) can collide with
@@ -151,11 +161,27 @@ fn build_instruction_messages(ix: &InstructionNode, ir: &mut SchemaIr) {
 
     let arg_fields = build_fields_ir(&args_name, &ix.arguments, ir, TypeKindIr::Helper);
 
-    ir.types.push(TypeIr {
-        name: args_name.clone(),
-        fields: arg_fields,
-        kind: TypeKindIr::Instruction,
-    });
+    // Skip emitting the instruction-kind args wrapper when its name collides
+    // with a top-level DefinedType. The proto schema renderer drops duplicate
+    // names and keeps the DefinedType's flat shape, so emitting the Rust
+    // wrapper here would encode one extra layer of nesting compared to what
+    // the schema declares (a schema/encoder mismatch the consumer can't
+    // decode). With the wrapper omitted, field resolution in the dispatch
+    // wrapper struct (`instruction::<IxName>`) naturally falls back to
+    // `super::<args_name>`, and the dispatch module emits a `pub use` to
+    // keep `instruction::<args_name>` paths working in parser helper fns.
+    let collides_with_defined_type = ir
+        .types
+        .iter()
+        .any(|t| t.name == args_name && t.kind == TypeKindIr::DefinedType);
+
+    if !collides_with_defined_type {
+        ir.types.push(TypeIr {
+            name: args_name.clone(),
+            fields: arg_fields,
+            kind: TypeKindIr::Instruction,
+        });
+    }
 
     ir.types.push(TypeIr {
         name: payload_name,
@@ -182,6 +208,13 @@ fn build_instruction_messages(ix: &InstructionNode, ir: &mut SchemaIr) {
 /// to each individual `<InstructionName>` payload.
 ///
 fn build_instruction_dispatch_oneof(instructions: &[InstructionNode], ir: &mut SchemaIr) {
+    // Nothing to dispatch — skip the oneof entirely. An empty InstructionDispatch
+    // would produce an uninhabited `Instruction` enum whose borsh match arms are
+    // non-exhaustive (E0004) and whose proto schema is invalid.
+    if instructions.is_empty() {
+        return;
+    }
+
     let parent_name = "Instructions".to_string();
 
     let variants: Vec<OneofVariantIr> = instructions

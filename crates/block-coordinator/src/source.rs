@@ -1,13 +1,19 @@
-//! CoordinatorSource — transparent tap between geyser stream and Vixen Runtime.
+//! CoordinatorSource — transparent tap between geyser stream and Shipstern Runtime.
 //!
-//! Implements Vixen's `SourceTrait` to forward raw geyser events to the coordinator
-//! while also forwarding transaction events to the Vixen Runtime.
+//! Implements Shipstern's `SourceTrait` to forward raw geyser events to the coordinator
+//! while also forwarding transaction events to the Shipstern Runtime.
 //!
 
 use std::{path::PathBuf, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use shipstern::{
+    sources::{SourceExitStatus, SourceTrait},
+    Error as ShipsternError,
+};
+use shipstern_core::{CommitmentLevel, Filters};
+use shipstern_yellowstone_grpc_source::YellowstoneGrpcConfig;
 use tokio::sync::{mpsc::Sender, oneshot};
 use yellowstone_grpc_client::GeyserGrpcClient;
 use yellowstone_grpc_proto::{
@@ -17,14 +23,12 @@ use yellowstone_grpc_proto::{
     },
     tonic::{transport::ClientTlsConfig, Status},
 };
-use yellowstone_vixen::{
-    sources::{SourceExitStatus, SourceTrait},
-    Error as VixenError,
-};
-use yellowstone_vixen_core::{CommitmentLevel, Filters};
-use yellowstone_vixen_yellowstone_grpc_source::YellowstoneGrpcConfig;
 
 use crate::{fixtures::FixtureWriter, types::CoordinatorInput};
+
+const DEFAULT_STREAM_IDLE_WARN_SECS: u64 = 0;
+
+const fn default_stream_idle_warn_secs() -> u64 { DEFAULT_STREAM_IDLE_WARN_SECS }
 
 /// Config for CoordinatorSource.
 ///
@@ -36,6 +40,17 @@ pub struct CoordinatorSourceConfig {
     #[command(flatten)]
     #[serde(flatten)]
     pub source: YellowstoneGrpcConfig,
+
+    /// Optional label used in logs to distinguish multiple coordinator sources in logs.
+    #[serde(default)]
+    #[arg(long)]
+    pub source_label: Option<String>,
+
+    /// Warn when no stream data has arrived for this many seconds.
+    /// Set to 0 to disable idle/resume logs.
+    #[serde(default = "default_stream_idle_warn_secs")]
+    #[arg(long, default_value_t = DEFAULT_STREAM_IDLE_WARN_SECS)]
+    pub stream_idle_warn_secs: u64,
 
     /// Channel to send CoordinatorInput events to the coordinator.
     #[serde(skip)]
@@ -95,11 +110,11 @@ impl CoordinatorSubscription for SubscribeRequest {
     }
 }
 
-/// Vixen source that taps the geyser stream for the coordinator.
+/// Shipstern source that taps the geyser stream for the coordinator.
 ///
 /// On each `SubscribeUpdate`:
 /// 1. Forward the raw event to the coordinator (clone for BlockSM-relevant events)
-/// 2. Forward Account/Transaction events to the Vixen Runtime (move, no clone)
+/// 2. Forward Account/Transaction events to the Shipstern Runtime (move, no clone)
 #[derive(Debug)]
 pub struct CoordinatorSource {
     config: CoordinatorSourceConfig,
@@ -116,9 +131,9 @@ impl SourceTrait for CoordinatorSource {
         &self,
         tx: Sender<Result<SubscribeUpdate, Status>>,
         status_tx: oneshot::Sender<SourceExitStatus>,
-    ) -> Result<(), VixenError> {
+    ) -> Result<(), ShipsternError> {
         let coordinator_tx = self.config.coordinator_input_tx.as_ref().ok_or_else(|| {
-            VixenError::Io(std::io::Error::other(
+            ShipsternError::Io(std::io::Error::other(
                 "coordinator_input_tx must be set before connect",
             ))
         })?;
@@ -126,23 +141,33 @@ impl SourceTrait for CoordinatorSource {
         let mut fixture_writer = match (&self.config.fixture_path, self.config.fixture_slots) {
             (Some(path), Some(slots)) => {
                 tracing::info!(?path, slots, "Fixture capture enabled");
-                Some(FixtureWriter::new(path, slots).map_err(VixenError::Io)?)
+                Some(FixtureWriter::new(path, slots).map_err(ShipsternError::Io)?)
             },
             _ => None,
         };
 
         let config = &self.config.source;
+        let source_label = self
+            .config
+            .source_label
+            .as_deref()
+            .unwrap_or("CoordinatorSource");
         let timeout = Duration::from_secs(config.timeout);
 
-        let mut client = GeyserGrpcClient::build_from_shared(config.endpoint.clone())?
+        let mut builder = GeyserGrpcClient::build_from_shared(config.endpoint.clone())?
             .x_token(config.x_token.clone())?
             .max_decoding_message_size(config.max_decoding_message_size.unwrap_or(usize::MAX))
             .accept_compressed(config.accept_compression.unwrap_or_default().into())
             .connect_timeout(timeout)
             .timeout(timeout)
-            .tls_config(ClientTlsConfig::new().with_native_roots())?
-            .connect()
-            .await?;
+            .tls_config(ClientTlsConfig::new().with_native_roots())?;
+
+        if let Some(reconnect_config) = config.reconnect_config() {
+            tracing::info!(source_label, ?reconnect_config, "Auto-reconnect enabled");
+            builder = builder.set_reconnect_config(reconnect_config);
+        }
+
+        let mut client = builder.connect().await?;
 
         let subscribe_request = SubscribeRequest::from(self.filters.clone())
             .with_coordinator_subscriptions()
@@ -150,13 +175,14 @@ impl SourceTrait for CoordinatorSource {
             .with_commitment_processed();
 
         tracing::info!(
+            source_label,
             has_transactions = !subscribe_request.transactions.is_empty(),
             has_blocks_meta = !subscribe_request.blocks_meta.is_empty(),
             has_slots = !subscribe_request.slots.is_empty(),
             has_entries = !subscribe_request.entry.is_empty(),
             from_slot = ?subscribe_request.from_slot,
             commitment = ?subscribe_request.commitment,
-            "CoordinatorSource subscribing to gRPC stream"
+            "subscribing to gRPC stream"
         );
 
         let (_sub_tx, stream) = client
@@ -165,11 +191,50 @@ impl SourceTrait for CoordinatorSource {
 
         let mut stream = std::pin::pin!(stream);
 
-        tracing::info!("CoordinatorSource gRPC stream started");
+        tracing::info!(source_label, "gRPC stream started");
+
+        let idle_warn_secs = self.config.stream_idle_warn_secs;
+        let stream_idle_timeout = Duration::from_secs(idle_warn_secs);
+        let mut last_seen_slot: Option<u64> = None;
+        let mut idle_since: Option<std::time::Instant> = None;
 
         let exit_status = 'stream: loop {
-            let Some(update) = stream.next().await else {
-                break SourceExitStatus::StreamEnded;
+            let update = if idle_warn_secs == 0 {
+                match stream.next().await {
+                    Some(update) => update,
+                    None => break SourceExitStatus::StreamEnded,
+                }
+            } else {
+                match tokio::time::timeout(stream_idle_timeout, stream.next()).await {
+                    Ok(Some(update)) => {
+                        // Stream resumed after idle — log recovery.
+                        if let Some(since) = idle_since.take() {
+                            tracing::info!(
+                                source_label,
+                                idle_duration_ms = since.elapsed().as_millis() as u64,
+                                ?last_seen_slot,
+                                endpoint = %self.config.source.endpoint,
+                                "stream resumed"
+                            );
+                        }
+                        update
+                    },
+                    Ok(None) => break SourceExitStatus::StreamEnded,
+                    Err(_) => {
+                        // Timeout — stream idle.
+                        if idle_since.is_none() {
+                            idle_since = Some(std::time::Instant::now());
+                            tracing::warn!(
+                                source_label,
+                                idle_warn_secs,
+                                ?last_seen_slot,
+                                endpoint = %self.config.source.endpoint,
+                                "stream idle"
+                            );
+                        }
+                        continue;
+                    },
+                }
             };
 
             if let Ok(subscribe_update) = &update {
@@ -202,6 +267,18 @@ impl SourceTrait for CoordinatorSource {
                         break 'stream SourceExitStatus::Error(
                             "Coordinator input channel closed".to_string(),
                         );
+                    }
+
+                    // Track last seen slot for idle/resume logging.
+                    let event_slot = match &subscribe_update.update_oneof {
+                        Some(UpdateOneof::Slot(s)) => Some(s.slot),
+                        Some(UpdateOneof::BlockMeta(bm)) => Some(bm.slot),
+                        Some(UpdateOneof::Transaction(tx)) => Some(tx.slot),
+                        Some(UpdateOneof::Account(acct)) => Some(acct.slot),
+                        _ => None,
+                    };
+                    if let Some(slot) = event_slot {
+                        last_seen_slot = Some(slot);
                     }
 
                     // Forward BlockSM-relevant events to the coordinator.

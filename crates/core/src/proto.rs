@@ -1,7 +1,7 @@
 //! Helpers for working with parsers whose output can be converted to an
 //! equivalent Protobuf representation.
 
-use yellowstone_vixen_proto::prost::{Message, Name};
+use shipstern_proto::prost::{Message, Name};
 
 use super::{Parser, ProgramParser};
 
@@ -10,7 +10,7 @@ use super::{Parser, ProgramParser};
 ///
 /// Invoking this macro defines a single helper trait:
 /// ```
-/// # use yellowstone_vixen_core::yellowstone_vixen_proto::prost::Message;
+/// # use shipstern_core::shipstern_proto::prost::Message;
 /// pub(crate) trait IntoProto<T: Message + Send + Sync> {
 ///     fn into_proto(self) -> T;
 /// }
@@ -22,8 +22,7 @@ use super::{Parser, ProgramParser};
 #[macro_export]
 macro_rules! proto_helper_traits {
     () => {
-        pub(crate) trait IntoProto<T: $crate::yellowstone_vixen_proto::prost::Message + Send + Sync>
-        {
+        pub(crate) trait IntoProto<T: $crate::shipstern_proto::prost::Message + Send + Sync> {
             fn into_proto(self) -> T;
         }
     };
@@ -74,7 +73,7 @@ impl<T: ParseProto + ProgramParser + Sync> ProgramParser for Proto<T>
 where T::Input: Sync
 {
     #[inline]
-    fn program_id(&self) -> crate::KeyBytes<32> { self.0.program_id() }
+    fn program_id(&self) -> crate::Pubkey { self.0.program_id() }
 }
 
 impl<T: ParseProto + Sync> Parser for Proto<T>

@@ -1,0 +1,43 @@
+// Regression test for type_name_conflict: glow.json declares both an account
+// and a defined type named `MarginAccount`. Without the fix in
+// `rust_types_from_ir` (skipping DefinedTypes shadowed by an Account of the
+// same name), this file would fail to compile with E0428 ("MarginAccount is
+// defined multiple times").
+//
+// This IDL has no instructions — only accounts — so only AccountParser is
+// exercised here.
+
+use shipstern_proc_macro::include_shipstern_parser;
+use shipstern_test_utils::check_protobuf_format;
+
+include_shipstern_parser!("../idls/glow.json");
+
+#[test]
+fn check_protobuf_schema() {
+    check_protobuf_format(margin::PROTOBUF_SCHEMA);
+
+    insta::assert_snapshot!(margin::PROTOBUF_SCHEMA);
+}
+
+#[test]
+fn account_dispatch_index_is_some() {
+    assert!(
+        margin::ACCOUNT_DISPATCH_MESSAGE_INDEX.is_some(),
+        "expected AccountDispatch message index to be present for an accounts-only IDL"
+    );
+}
+
+#[test]
+fn check_json_serialization() {
+    // account
+    let state = margin::LiquidationState::default();
+    let json_str = serde_json::to_string(&state).expect("failed to json serialize");
+    let _: margin::LiquidationState =
+        serde_json::from_str(&json_str).expect("failed to json deserialize");
+
+    // instruction
+    let invoke = margin::LiquidatorInvokeBegin::default();
+    let json_str = serde_json::to_string(&invoke).expect("failed to json serialize");
+    let _: margin::LiquidatorInvokeBegin =
+        serde_json::from_str(&json_str).expect("failed to json deserialize");
+}

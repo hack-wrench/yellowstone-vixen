@@ -1,16 +1,15 @@
-//! Helper types for bundling [Vixen parsers](crate::vixen_core::Parser) and
+//! Helper types for bundling [Shipstern parsers](crate::shipstern_core::Parser) and
 //! handler callbacks.
 
 use std::{borrow::Cow, collections::HashMap, pin::Pin};
 
 use futures_util::{Future, FutureExt, StreamExt};
+use shipstern_core::{
+    AccountUpdate, BlockMetaUpdate, BlockUpdate, Filters, GetPrefilter, ParseError, Parser,
+    ParserId, Prefilter, SlotUpdate, TransactionUpdate,
+};
 use smallvec::SmallVec;
 use tracing::{trace, Instrument, Span};
-use vixen_core::{
-    AccountUpdate, BlockMetaUpdate, BlockUpdate, GetPrefilter, ParserId, SlotUpdate,
-    TransactionUpdate,
-};
-use yellowstone_vixen_core::{Filters, ParseError, Parser, Prefilter};
 
 #[cfg(feature = "prometheus")]
 use crate::metrics;
@@ -160,11 +159,14 @@ where
         let parsed = match self
             .0
             .parse(value)
-            .instrument(tracing::info_span!("vixen.parse",))
+            .instrument(tracing::debug_span!("shipstern.parse",))
             .await
         {
             Ok(p) => p,
             Err(ParseError::Filtered) => return Ok(()),
+            Err(ParseError::DiscriminatorNotFound(msg)) => {
+                return Err(PipelineErrors::Parse(msg.into()));
+            },
             Err(ParseError::Other(e)) => return Err(PipelineErrors::Parse(e)),
         };
         let parsed = &parsed;
@@ -173,7 +175,7 @@ where
             .into_iter()
             .map(|h| async move {
                 h.handle(parsed, value)
-                    .instrument(tracing::info_span!("vixen.handle",))
+                    .instrument(tracing::debug_span!("shipstern.handle",))
                     .await
             })
             .collect::<futures_util::stream::FuturesUnordered<_>>()

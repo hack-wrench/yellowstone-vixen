@@ -9,11 +9,8 @@ pub mod sink;
 pub mod topics;
 pub mod utils;
 
-/// Solana public key — 32-byte key alias used throughout this crate.
-pub type Pubkey = yellowstone_vixen_core::KeyBytes<32>;
-
 // Re-export main types
-pub use config::KafkaSinkConfig;
+pub use config::{KafkaCompressionType, KafkaSinkConfig};
 pub use events::{
     AccountSlotCommitEvent, CommitScope, MarkerType, PreparedRecord, RawAccountEvent,
     RawInstructionEvent, RecordHeader, RecordKind, TransactionSlotCommitEvent,
@@ -23,11 +20,11 @@ pub use handler::BufferingHandler;
 pub use handler::PassthroughAccountHandler;
 pub use kafka_sink::TransactionSlotSink;
 #[cfg(feature = "experimental-account-parser")]
-pub use kafka_sink::{AccountMsg, AccountSink};
+pub use kafka_sink::{AccountMsg, AccountPassthroughSink, AccountSlotSink};
 pub use parsers::{AccountSubscription, TransactionSubscription};
-pub use producer::create_producer;
-// Re-export rdkafka types for convenience
-pub use rdkafka::producer::FutureProducer;
+pub use producer::{create_producer, initialize_transactional_producer};
+// Re-export rdkafka producer types for convenience
+pub use rdkafka::producer::{FutureProducer, FutureRecord};
 pub use schema_registry::{
     ensure_schemas_registered, wrap_payload_with_confluent_wire_format, RegisteredSchema,
     SchemaDefinition,

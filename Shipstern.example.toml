@@ -1,0 +1,71 @@
+# This is an example TOML configuration file for Shipstern.
+# Copy to Shipstern.toml and then modify as needed.
+
+# Only needed if you are using the Yellowstone gRPC as a source.
+[source]
+# The endpoint of the dragon's mouth stream.
+# This is the URL where the stream can be accessed.
+endpoint = "https://index.rpcpool.com"
+
+# The x-token for the dragon's mouth stream.
+# Replace <X-TOKEN> with your actual token.
+x-token = "<X-TOKEN>"
+
+# The connection timeout for the dragon's mouth stream in seconds.
+# This defines how long to wait for a connection before timing out.
+timeout = 60
+
+# Built-in auto-reconnect for the gRPC stream.
+# When enabled (the default), the stream reconnects with exponential backoff
+# after a transient failure, resumes from the last seen slot, and deduplicates
+# replayed events. The server must have `replay_stored_slots` configured for
+# gap-free recovery. Set to false to disable reconnect entirely.
+#auto-reconnect = true
+
+# Maximum reconnect attempts before the stream gives up.
+# Only applies when auto-reconnect is enabled. Defaults to 10, which with the
+# 500ms/2.0x backoff covers outages up to ~4 minutes. Increase for longer
+# tolerated outages.
+#reconnect-max-retries = 10
+
+# Number of recent slots retained for deduplication during the replay window.
+# Only applies when auto-reconnect is enabled. Defaults to the client library
+# value; raise it if your replay window is large.
+#reconnect-slot-retention = 150
+
+# Windows of account data to receive in place of the whole account.
+# Applies to the whole subscription rather than to one parser, so every account
+# pipeline sees the same truncated data. Windows must ascend by offset and must
+# not overlap; the server refuses the subscription otherwise, which is checked
+# before connecting. Omit for full account data.
+#[[source.accounts-data-slice]]
+#offset = 0
+#length = 8
+
+# # Only needed if you are using Fumarole as a source.
+# [source]
+# endpoint = "https://index.rpcpool.com"
+# x-token = "<X-TOKEN>"
+# subscriber-name = "my_subscribe_group"
+
+# Job scheduler configuration. Optional: omitting the whole section uses the
+# defaults below.
+#[buffer]
+
+# The maximum number of concurrent jobs to run.
+# Defaults to the number of CPUs when unset.
+#jobs = 8
+
+# The maximum number of concurrent sources to run.
+#sources-channel-size = 100
+
+# Metrics are not configured from this file. The runtime takes a
+# `prometheus::Registry` through the builder instead:
+#
+#     Runtime::<YellowstoneGrpcSource>::builder()
+#         .metrics(prometheus::Registry::new())
+#         .build(config)
+#
+# and it serves no HTTP endpoint of its own. `examples/prometheus` gathers that
+# registry on an interval and pushes it to a Pushgateway; `docker-compose.yaml`
+# runs the Pushgateway on :9091 and a Prometheus that scrapes it on :9090.

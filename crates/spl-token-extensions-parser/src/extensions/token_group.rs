@@ -1,68 +1,68 @@
+use shipstern_core::instruction::InstructionUpdate;
+use shipstern_parser::{check_min_accounts_req, Result, ResultExt};
+use shipstern_proc_macro::shipstern;
 use spl_token_group_interface::instruction::TokenGroupInstruction as SplTokenGroupInstruction;
-use yellowstone_vixen_core::instruction::InstructionUpdate;
-use yellowstone_vixen_parser::{check_min_accounts_req, Result, ResultExt};
-use yellowstone_vixen_proc_macro::vixen;
 
-use crate::{ExtensionInstructionParser, PublicKey};
+use crate::{ExtensionInstructionParser, Pubkey};
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeGroupAccounts {
-    pub group: PublicKey,
-    pub mint: PublicKey,
-    pub mint_authority: PublicKey,
+    pub group: Pubkey,
+    pub mint: Pubkey,
+    pub mint_authority: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeGroupArgs {
     pub max_size: u64,
-    pub update_authority: ::core::option::Option<PublicKey>,
+    pub update_authority: ::core::option::Option<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UpdateGroupMaxSizeAccounts {
-    pub group: PublicKey,
-    pub update_authority: PublicKey,
+    pub group: Pubkey,
+    pub update_authority: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UpdateGroupMaxSizeArgs {
     pub max_size: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UpdateGroupAuthorityAccounts {
-    pub group: PublicKey,
-    pub current_authority: PublicKey,
+    pub group: Pubkey,
+    pub current_authority: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UpdateGroupAuthorityArgs {
-    pub new_authority: Option<PublicKey>,
+    pub new_authority: Option<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMemberAccounts {
-    pub member: PublicKey,
-    pub member_mint: PublicKey,
-    pub member_mint_authority: PublicKey,
-    pub group: PublicKey,
-    pub group_update_authority: PublicKey,
+    pub member: Pubkey,
+    pub member_mint: Pubkey,
+    pub member_mint_authority: Pubkey,
+    pub group: Pubkey,
+    pub group_update_authority: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMemberArgs {
     // empty
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TokenGroupIx {
     #[hint(oneof = "token_group_instruction::Instruction", tags = "1, 2, 3, 4")]
@@ -70,62 +70,43 @@ pub struct TokenGroupIx {
 }
 
 pub mod token_group_instruction {
-    use super::vixen;
+    use super::shipstern;
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeGroup {
         pub accounts: super::InitializeGroupAccounts,
         pub args: super::InitializeGroupArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct UpdateGroupMaxSize {
         pub accounts: super::UpdateGroupMaxSizeAccounts,
         pub args: super::UpdateGroupMaxSizeArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct UpdateGroupAuthority {
         pub accounts: super::UpdateGroupAuthorityAccounts,
         pub args: super::UpdateGroupAuthorityArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeMember {
         pub accounts: super::InitializeMemberAccounts,
         pub args: super::InitializeMemberArgs,
     }
 
-    #[vixen(oneof)]
+    #[shipstern(oneof)]
     #[derive(Clone, PartialEq)]
     pub enum Instruction {
         InitializeGroup(InitializeGroup),
         UpdateGroupMaxSize(UpdateGroupMaxSize),
         UpdateGroupAuthority(UpdateGroupAuthority),
         InitializeMember(InitializeMember),
-    }
-}
-
-#[inline]
-fn pod_u64_to_u64(v: spl_pod::primitives::PodU64) -> u64 {
-    // PodU64 is a little-endian wrapper
-    u64::from_le_bytes(v.0)
-}
-
-#[inline]
-fn opt_nonzero_pubkey_to_bytes(
-    v: spl_pod::optional_keys::OptionalNonZeroPubkey,
-) -> ::core::option::Option<PublicKey> {
-    let bytes: [u8; 32] = v.0.to_bytes();
-
-    if bytes == [0u8; 32] {
-        None
-    } else {
-        Some(PublicKey::new(bytes))
     }
 }
 
@@ -144,13 +125,16 @@ impl ExtensionInstructionParser for TokenGroupIx {
 
                 oneof::Instruction::InitializeGroup(oneof::InitializeGroup {
                     accounts: InitializeGroupAccounts {
-                        group: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        mint: crate::PublicKey::new(ix.accounts[1].to_vec()),
-                        mint_authority: crate::PublicKey::new(ix.accounts[2].to_vec()),
+                        group: crate::Pubkey::new(ix.accounts[0].0),
+                        mint: crate::Pubkey::new(ix.accounts[1].0),
+                        mint_authority: crate::Pubkey::new(ix.accounts[2].0),
                     },
                     args: InitializeGroupArgs {
-                        max_size: pod_u64_to_u64(args.max_size),
-                        update_authority: opt_nonzero_pubkey_to_bytes(args.update_authority),
+                        max_size: u64::from(args.max_size),
+                        update_authority: args
+                            .update_authority
+                            .get()
+                            .map(|key| Pubkey::new(key.to_bytes())),
                     },
                 })
             },
@@ -159,11 +143,11 @@ impl ExtensionInstructionParser for TokenGroupIx {
 
                 oneof::Instruction::UpdateGroupMaxSize(oneof::UpdateGroupMaxSize {
                     accounts: UpdateGroupMaxSizeAccounts {
-                        group: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        update_authority: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                        group: crate::Pubkey::new(ix.accounts[0].0),
+                        update_authority: crate::Pubkey::new(ix.accounts[1].0),
                     },
                     args: UpdateGroupMaxSizeArgs {
-                        max_size: pod_u64_to_u64(args.max_size),
+                        max_size: u64::from(args.max_size),
                     },
                 })
             },
@@ -172,11 +156,14 @@ impl ExtensionInstructionParser for TokenGroupIx {
 
                 oneof::Instruction::UpdateGroupAuthority(oneof::UpdateGroupAuthority {
                     accounts: UpdateGroupAuthorityAccounts {
-                        group: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        current_authority: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                        group: crate::Pubkey::new(ix.accounts[0].0),
+                        current_authority: crate::Pubkey::new(ix.accounts[1].0),
                     },
                     args: UpdateGroupAuthorityArgs {
-                        new_authority: Some(crate::PublicKey::new(args.new_authority.0.to_bytes())),
+                        new_authority: args
+                            .new_authority
+                            .get()
+                            .map(|key| Pubkey::new(key.to_bytes())),
                     },
                 })
             },
@@ -185,11 +172,11 @@ impl ExtensionInstructionParser for TokenGroupIx {
 
                 oneof::Instruction::InitializeMember(oneof::InitializeMember {
                     accounts: InitializeMemberAccounts {
-                        member: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        member_mint: crate::PublicKey::new(ix.accounts[1].to_vec()),
-                        member_mint_authority: crate::PublicKey::new(ix.accounts[2].to_vec()),
-                        group: crate::PublicKey::new(ix.accounts[3].to_vec()),
-                        group_update_authority: crate::PublicKey::new(ix.accounts[4].to_vec()),
+                        member: crate::Pubkey::new(ix.accounts[0].0),
+                        member_mint: crate::Pubkey::new(ix.accounts[1].0),
+                        member_mint_authority: crate::Pubkey::new(ix.accounts[2].0),
+                        group: crate::Pubkey::new(ix.accounts[3].0),
+                        group_update_authority: crate::Pubkey::new(ix.accounts[4].0),
                     },
                     args: InitializeMemberArgs {},
                 })

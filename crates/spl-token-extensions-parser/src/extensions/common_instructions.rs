@@ -1,11 +1,11 @@
-use yellowstone_vixen_core::instruction::InstructionUpdate;
-use yellowstone_vixen_parser::{check_min_accounts_req, Error, Result};
-use yellowstone_vixen_proc_macro::vixen;
+use shipstern_core::instruction::InstructionUpdate;
+use shipstern_parser::{check_min_accounts_req, Error, Result};
+use shipstern_proc_macro::shipstern;
 
 use super::extension::decode_extension_ix_type;
-use crate::PublicKey;
+use crate::Pubkey;
 
-#[vixen(enumeration)]
+#[shipstern(enumeration)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExtensionWithCommonInstruction {
@@ -43,37 +43,37 @@ impl ExtensionWithCommonInstruction {
     }
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ExtInitializeAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UpdateAccounts {
-    pub mint: PublicKey,
-    pub extension_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub extension_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct EnableAccounts {
-    pub account: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct DisableAccounts {
-    pub account: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct CommonExtensionInstructions {
     #[hint(enumeration = "ExtensionWithCommonInstruction")]
@@ -87,33 +87,33 @@ pub struct CommonExtensionInstructions {
 }
 
 pub mod common_extension_instructions {
-    use super::vixen;
+    use super::shipstern;
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Initialize {
         pub accounts: super::ExtInitializeAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Update {
         pub accounts: super::UpdateAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Enable {
         pub accounts: super::EnableAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Disable {
         pub accounts: super::DisableAccounts,
     }
 
-    #[vixen(oneof)]
+    #[shipstern(oneof)]
     #[derive(Clone, PartialEq)]
     pub enum Instruction {
         Initialize(Initialize),
@@ -141,7 +141,7 @@ impl CommonExtensionInstructions {
                         extension: extension as i32,
                         instruction: Some(oneof::Instruction::Initialize(oneof::Initialize {
                             accounts: ExtInitializeAccounts {
-                                mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
+                                mint: crate::Pubkey::new(ix.accounts[0].0),
                             },
                         })),
                     }
@@ -152,11 +152,11 @@ impl CommonExtensionInstructions {
                         extension: extension as i32,
                         instruction: Some(oneof::Instruction::Update(oneof::Update {
                             accounts: UpdateAccounts {
-                                mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                                extension_authority: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                                mint: crate::Pubkey::new(ix.accounts[0].0),
+                                extension_authority: crate::Pubkey::new(ix.accounts[1].0),
                                 multisig_signers: ix.accounts[2..]
                                     .iter()
-                                    .map(|a| crate::PublicKey::new(a.to_vec()))
+                                    .map(|a| crate::Pubkey::new(a.0))
                                     .collect(),
                             },
                         })),
@@ -172,11 +172,11 @@ impl CommonExtensionInstructions {
                         extension: extension as i32,
                         instruction: Some(oneof::Instruction::Enable(oneof::Enable {
                             accounts: EnableAccounts {
-                                account: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                                owner: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                                account: crate::Pubkey::new(ix.accounts[0].0),
+                                owner: crate::Pubkey::new(ix.accounts[1].0),
                                 multisig_signers: ix.accounts[2..]
                                     .iter()
-                                    .map(|a| crate::PublicKey::new(a.to_vec()))
+                                    .map(|a| crate::Pubkey::new(a.0))
                                     .collect(),
                             },
                         })),
@@ -188,11 +188,11 @@ impl CommonExtensionInstructions {
                         extension: extension as i32,
                         instruction: Some(oneof::Instruction::Disable(oneof::Disable {
                             accounts: DisableAccounts {
-                                account: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                                owner: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                                account: crate::Pubkey::new(ix.accounts[0].0),
+                                owner: crate::Pubkey::new(ix.accounts[1].0),
                                 multisig_signers: ix.accounts[2..]
                                     .iter()
-                                    .map(|a| crate::PublicKey::new(a.to_vec()))
+                                    .map(|a| crate::Pubkey::new(a.0))
                                     .collect(),
                             },
                         })),

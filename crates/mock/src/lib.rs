@@ -22,6 +22,11 @@ use std::{
 pub use futures;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use shipstern_core::{
+    instruction::{InstructionShared, InstructionUpdate},
+    log_messages::split_logs_by_outer_ix,
+    KeyBytes, ProgramParser,
+};
 use solana_client::{nonblocking::rpc_client::RpcClient, rpc_request::RpcRequest};
 use solana_rpc_client_api::client_error::Result as ClientResult;
 use solana_sdk::{account::Account, bs58, pubkey::Pubkey, signature::Signature};
@@ -31,10 +36,6 @@ use solana_transaction_status::{
     UiInnerInstructions, UiInstruction, UiMessage,
 };
 use yellowstone_grpc_proto::geyser::{SubscribeUpdateAccount, SubscribeUpdateAccountInfo};
-use yellowstone_vixen_core::{
-    instruction::{InstructionShared, InstructionUpdate},
-    KeyBytes, ProgramParser,
-};
 
 const DEFAULT_RPC_ENDPOINT: &str = "https://api.devnet.solana.com";
 
@@ -63,7 +64,7 @@ impl From<AccountInfo> for SubscribeUpdateAccount {
                 txn_signature: None,
                 write_version: 0,
                 pubkey: value.pubkey.to_bytes().to_vec(),
-                data: value.data.into(),
+                data: value.data,
                 executable: value.executable,
                 lamports: value.lamports,
                 owner: value.owner.to_bytes().to_vec(),
@@ -95,7 +96,7 @@ impl TryFrom<SubscribeUpdateAccount> for AccountInfo {
 
         Ok(Self {
             pubkey,
-            data: account_info.data.to_vec(),
+            data: account_info.data.clone(),
             executable: account_info.executable,
             lamports: account_info.lamports,
             owner,
@@ -135,6 +136,8 @@ pub struct SerializableInstructionUpdate {
     pub accounts: Vec<SerializablePubkey>,
     pub data: Vec<u8>,
     pub inner: Vec<SerializableInstructionUpdate>,
+    #[serde(default)]
+    pub log_messages: Vec<String>,
 }
 
 impl From<&InstructionUpdate> for SerializableInstructionUpdate {
@@ -149,26 +152,46 @@ impl From<&InstructionUpdate> for SerializableInstructionUpdate {
                 .collect(),
             data: value.data.clone(),
             inner: value.inner.iter().map(Into::into).collect(),
+            log_messages: value.log_messages().to_vec(),
         }
     }
 }
 
 impl From<&SerializableInstructionUpdate> for InstructionUpdate {
-    #[allow(clippy::cast_possible_truncation)]
     fn from(value: &SerializableInstructionUpdate) -> Self {
-        Self {
-            program: value.program.into(),
-            accounts: value.accounts.iter().copied().map(Into::into).collect(),
-            data: value.data.clone(),
-            shared: Arc::new(InstructionShared::default()),
-            inner: value.inner.iter().map(Into::into).collect(),
-            path: value
-                .ix_index
-                .iter()
-                .map(|x| *x as u32)
-                .collect::<Vec<u32>>()
-                .into(),
-        }
+        let shared = Arc::new(InstructionShared {
+            log_messages: value.log_messages.clone(),
+            ..InstructionShared::default()
+        });
+
+        convert_instruction(value, &shared)
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn convert_instruction(
+    value: &SerializableInstructionUpdate,
+    shared: &Arc<InstructionShared>,
+) -> InstructionUpdate {
+    let log_range = 0..shared.log_messages.len();
+
+    InstructionUpdate {
+        program: value.program.into(),
+        accounts: value.accounts.iter().copied().map(Into::into).collect(),
+        data: value.data.clone(),
+        shared: Arc::clone(shared),
+        inner: value
+            .inner
+            .iter()
+            .map(|inner| convert_instruction(inner, shared))
+            .collect(),
+        log_range,
+        path: value
+            .ix_index
+            .iter()
+            .map(|x| *x as u32)
+            .collect::<Vec<u32>>()
+            .into(),
     }
 }
 
@@ -214,6 +237,7 @@ fn try_from_ui_instructions(
             accounts: accounts_out,
             program,
             inner: Vec::new(),
+            log_messages: vec![],
         };
 
         ixs.push(ix);
@@ -243,6 +267,7 @@ fn try_from_ui_inner_ixs(
                 accounts: accounts_out,
                 program,
                 inner: Vec::new(),
+                log_messages: vec![],
             };
             ixs.push(ix);
         } else {
@@ -250,6 +275,21 @@ fn try_from_ui_inner_ixs(
         }
     }
     Ok(filter_ixs(ixs, program_id))
+}
+
+fn assign_logs_to_instructions(
+    logs: &[String],
+    instructions: &mut [SerializableInstructionUpdate],
+) {
+    let per_outer = split_logs_by_outer_ix(logs);
+
+    for ix in instructions.iter_mut() {
+        let outer_idx = ix.ix_index[0];
+
+        if let Some(ix_logs) = per_outer.get(outer_idx) {
+            ix.log_messages.clone_from(ix_logs);
+        }
+    }
 }
 
 fn filter_ixs(
@@ -265,11 +305,12 @@ fn filter_ixs(
 fn try_from_tx_meta<P: ProgramParser>(
     value: EncodedConfirmedTransactionWithStatusMeta,
     parser: &P,
-) -> Result<Vec<SerializableInstructionUpdate>, String> {
+) -> Result<SerializableTransactionFixture, String> {
     let EncodedConfirmedTransactionWithStatusMeta {
         transaction,
         slot: _,
         block_time: _,
+        transaction_index: _,
     } = value;
     let EncodedTransactionWithStatusMeta {
         transaction,
@@ -277,6 +318,7 @@ fn try_from_tx_meta<P: ProgramParser>(
         version: _,
     } = transaction;
     let mut inner_ixs: Option<Vec<UiInnerInstructions>> = None;
+    let mut log_messages: Vec<String> = Vec::new();
 
     let mut account_keys: Vec<String> = Vec::new();
     let program_id = parser.program_id().to_string();
@@ -287,6 +329,10 @@ fn try_from_tx_meta<P: ProgramParser>(
 
             if let Some(meta) = meta {
                 inner_ixs = meta.inner_instructions.map(Some).flatten();
+
+                if let OptionSerializer::Some(logs) = meta.log_messages {
+                    log_messages = logs;
+                }
 
                 if let OptionSerializer::Some(loaded) = meta.loaded_addresses {
                     for address in loaded.writable {
@@ -304,25 +350,27 @@ fn try_from_tx_meta<P: ProgramParser>(
                 try_from_ui_instructions(&raw_message.instructions, &account_keys, &program_id)?;
 
             // filtering inner instructions by program id
-            if let Some(inner_ixs) = inner_ixs {
-                if inner_ixs.is_empty() {
-                    return Ok(program_filtered_ixs);
-                }
-
+            if let Some(inner_ixs) = inner_ixs
+                && !inner_ixs.is_empty()
+            {
                 for ixs in inner_ixs {
                     let inner_ixs = try_from_ui_inner_ixs(&ixs, &account_keys, &program_id)?;
-                    if inner_ixs.is_empty() {
-                        continue;
+
+                    if !inner_ixs.is_empty() {
+                        program_filtered_ixs.extend(inner_ixs);
                     }
-
-                    program_filtered_ixs.extend(inner_ixs);
                 }
-
-                return Ok(program_filtered_ixs);
             }
-        } else {
-            return Err("Invalid transaction encoding".into());
+
+            assign_logs_to_instructions(&log_messages, &mut program_filtered_ixs);
+
+            return Ok(SerializableTransactionFixture {
+                instructions: program_filtered_ixs,
+                log_messages,
+            });
         }
+
+        return Err("Invalid transaction encoding".into());
     }
 
     Err("Invalid transaction encoding".into())
@@ -344,8 +392,8 @@ macro_rules! account_fixture {
 macro_rules! tx_fixture {
     ($sig:expr, $parser:expr) => {
         match $crate::load_fixture($sig, $parser).await.unwrap() {
-            $crate::FixtureData::Instructions(ixs) => {
-                let futures = ixs.iter().map(|ix| {
+            $crate::FixtureData::Instructions(fixture) => {
+                let futures = fixture.instructions.iter().map(|ix| {
                     let parser = $parser.clone();
                     async move { $crate::run_ix_parse!(parser, ix) }
                 });
@@ -369,8 +417,8 @@ macro_rules! run_ix_parse {
             Ok(v) => Some(v),
 
             // Ignore filtered instructions, but panic on actual errors
-            Err(yellowstone_vixen_core::ParseError::Filtered) => None,
-            Err(e) => panic!("parse error: {e:?}"),
+            Err(shipstern_core::ParseError::Filtered) => None,
+            Err(_) => panic!("parse error"),
         }
     };
 }
@@ -413,10 +461,21 @@ pub fn get_rpc_client() -> RpcClient {
     RpcClient::new(endpoint)
 }
 
+/// Serializable transaction fixture: instructions + log messages.
+///
+/// Backward-compatible: deserializing a plain JSON array (old format) yields
+/// instructions with empty log messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializableTransactionFixture {
+    pub instructions: Vec<SerializableInstructionUpdate>,
+    #[serde(default)]
+    pub log_messages: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum FixtureData {
     Account(SubscribeUpdateAccount),
-    Instructions(Vec<SerializableInstructionUpdate>),
+    Instructions(SerializableTransactionFixture),
 }
 
 async fn fetch_fixture<P: ProgramParser>(
@@ -443,22 +502,33 @@ async fn fetch_fixture<P: ProgramParser>(
             let signature = Signature::from_str(fixture)?;
             let rpc_client = get_rpc_client();
 
-            let params = json!([signature.to_string(), {
-                "encoding": "json",
-                "maxSupportedTransactionVersion": 0
-            }]);
+            let params = get_transaction_params(&signature.to_string());
 
             let tx = rpc_client
                 .send(RpcRequest::GetTransaction, params)
                 .await
                 .map_err(|e| format!("Error fetching tx: {e:?}"))?;
 
-            let instructions = try_from_tx_meta(tx, parser)?;
+            let fixture = try_from_tx_meta(tx, parser)?;
 
-            Ok(FixtureData::Instructions(instructions))
+            Ok(FixtureData::Instructions(fixture))
         },
         FixtureType::Invalid => Err("Invalid fixture".into()),
     }
+}
+
+/// Params for the `getTransaction` call that backs a signature fixture.
+///
+/// `maxSupportedTransactionVersion` is the JSON-RPC version ceiling: the node
+/// refuses to return any transaction newer than it. It sat at `0` from before
+/// V1 existed, which would make a V1 fixture unfetchable. It is not a
+/// deliberate V0-only constraint, so it tracks the newest version shipstern
+/// can parse.
+fn get_transaction_params(signature: &str) -> serde_json::Value {
+    json!([signature, {
+        "encoding": "json",
+        "maxSupportedTransactionVersion": 1
+    }])
 }
 
 fn write_fixture(
@@ -472,8 +542,8 @@ fn write_fixture(
 
                 fs::write(&path, data)?;
             },
-            FixtureData::Instructions(instructions) => {
-                let data = serde_json::to_string(&instructions)?;
+            FixtureData::Instructions(fixture) => {
+                let data = serde_json::to_string(&fixture)?;
                 fs::write(&path, data)?;
             },
         }
@@ -534,8 +604,19 @@ pub fn read_account_fixture(data: &[u8]) -> Result<FixtureData, Box<dyn std::err
 }
 
 pub fn read_instructions_fixture(data: &[u8]) -> Result<FixtureData, Box<dyn std::error::Error>> {
-    let instructions: Vec<SerializableInstructionUpdate> = serde_json::from_slice(data)?;
-    Ok(FixtureData::Instructions(instructions))
+    // Try new format first (object with instructions + log_messages),
+    // fall back to old format (plain array of instructions).
+    let fixture: SerializableTransactionFixture =
+        serde_json::from_slice::<SerializableTransactionFixture>(data).or_else(|_| {
+            let instructions: Vec<SerializableInstructionUpdate> = serde_json::from_slice(data)?;
+
+            Ok::<_, serde_json::Error>(SerializableTransactionFixture {
+                instructions,
+                log_messages: vec![],
+            })
+        })?;
+
+    Ok(FixtureData::Instructions(fixture))
 }
 
 pub fn read_fixture(path: &Path) -> Result<FixtureData, Box<dyn std::error::Error>> {
@@ -563,4 +644,20 @@ pub fn decode_bs58_to_bytes(bs58: &str) -> Result<Vec<u8>, String> {
         .into_vec()
         .map_err(|e| format!("Error decoding bs58: {e:?}"))?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_transaction_params;
+
+    /// A ceiling of 0 makes the node refuse every V1 transaction, so a V1
+    /// fixture could never be captured through this path.
+    #[test]
+    fn get_transaction_asks_for_v1_transactions() {
+        let params = get_transaction_params("sig");
+
+        assert_eq!(params[0], "sig");
+        assert_eq!(params[1]["maxSupportedTransactionVersion"], 1);
+        assert_eq!(params[1]["encoding"], "json");
+    }
 }

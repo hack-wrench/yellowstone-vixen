@@ -1,22 +1,22 @@
+use shipstern_core::instruction::InstructionUpdate;
+use shipstern_parser::{check_min_accounts_req, Result, ResultExt};
+use shipstern_proc_macro::shipstern;
 use spl_token_2022::extension::transfer_fee::instruction::TransferFeeInstruction as SplTransferFeeInstruction;
-use yellowstone_vixen_core::instruction::InstructionUpdate;
-use yellowstone_vixen_parser::{check_min_accounts_req, Result, ResultExt};
-use yellowstone_vixen_proc_macro::vixen;
 
 use super::extension::ExtensionInstructionParser;
-use crate::PublicKey;
+use crate::Pubkey;
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferCheckedWithFeeAccounts {
-    pub source: PublicKey,
-    pub mint: PublicKey,
-    pub destination: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub mint: Pubkey,
+    pub destination: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferCheckedWithFeeArgs {
     pub amount: u64,
@@ -25,57 +25,57 @@ pub struct TransferCheckedWithFeeArgs {
     pub decimals: u32,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeTransferFeeConfigAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeTransferFeeConfigArgs {
-    pub transfer_fee_config_authority: Option<PublicKey>,
-    pub withdraw_withheld_authority: Option<PublicKey>,
+    pub transfer_fee_config_authority: Option<Pubkey>,
+    pub withdraw_withheld_authority: Option<Pubkey>,
     // u16 -> uint32 in proto
     pub transfer_fee_basis_points: u32,
     pub maximum_fee: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct WithdrawWithheldTokensFromMintAccounts {
-    pub mint: PublicKey,
-    pub fee_recipient: PublicKey,
-    pub withdraw_withheld_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub fee_recipient: Pubkey,
+    pub withdraw_withheld_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct WithdrawWithheldTokensFromAccountsAccounts {
-    pub mint: PublicKey,
-    pub fee_recipient: PublicKey,
-    pub withdraw_withheld_authority: PublicKey,
-    pub source_accounts: Vec<PublicKey>,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub fee_recipient: Pubkey,
+    pub withdraw_withheld_authority: Pubkey,
+    pub source_accounts: Vec<Pubkey>,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct WithdrawWithheldTokensFromAccountsArgs {
     // u8 -> uint32 in proto
     pub num_token_accounts: u32,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct SetTransferFeeAccounts {
-    pub mint: PublicKey,
-    pub mint_fee_acc_owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub mint_fee_acc_owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct SetTransferFeeArgs {
     // u16 -> uint32 in proto
@@ -83,14 +83,14 @@ pub struct SetTransferFeeArgs {
     pub maximum_fee: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct HarvestWithheldTokensToMintAccounts {
-    pub mint: PublicKey,
-    pub mint_fee_acc_owner: PublicKey,
+    pub mint: Pubkey,
+    pub mint_fee_acc_owner: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferFeeIx {
     #[hint(
@@ -101,49 +101,49 @@ pub struct TransferFeeIx {
 }
 
 pub mod transfer_fee_instruction {
-    use super::vixen;
+    use super::shipstern;
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct TransferCheckedWithFee {
         pub accounts: super::TransferCheckedWithFeeAccounts,
         pub args: super::TransferCheckedWithFeeArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeTransferFeeConfig {
         pub accounts: super::InitializeTransferFeeConfigAccounts,
         pub args: super::InitializeTransferFeeConfigArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct WithdrawWithheldTokensFromMint {
         pub accounts: super::WithdrawWithheldTokensFromMintAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct WithdrawWithheldTokensFromAccounts {
         pub accounts: super::WithdrawWithheldTokensFromAccountsAccounts,
         pub args: super::WithdrawWithheldTokensFromAccountsArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct HarvestWithheldTokensToMint {
         pub accounts: super::HarvestWithheldTokensToMintAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct SetTransferFee {
         pub accounts: super::SetTransferFeeAccounts,
         pub args: super::SetTransferFeeArgs,
     }
 
-    #[vixen(oneof)]
+    #[shipstern(oneof)]
     #[derive(Clone, PartialEq)]
     pub enum Instruction {
         TransferCheckedWithFee(TransferCheckedWithFee),
@@ -175,13 +175,13 @@ impl ExtensionInstructionParser for TransferFeeIx {
 
                 oneof::Instruction::TransferCheckedWithFee(oneof::TransferCheckedWithFee {
                     accounts: TransferCheckedWithFeeAccounts {
-                        source: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        mint: crate::PublicKey::new(ix.accounts[1].to_vec()),
-                        destination: crate::PublicKey::new(ix.accounts[2].to_vec()),
-                        owner: crate::PublicKey::new(ix.accounts[3].to_vec()),
+                        source: crate::Pubkey::new(ix.accounts[0].0),
+                        mint: crate::Pubkey::new(ix.accounts[1].0),
+                        destination: crate::Pubkey::new(ix.accounts[2].0),
+                        owner: crate::Pubkey::new(ix.accounts[3].0),
                         multisig_signers: ix.accounts[4..]
                             .iter()
-                            .map(|a| crate::PublicKey::new(a.to_vec()))
+                            .map(|a| crate::Pubkey::new(a.0))
                             .collect(),
                     },
                     args: TransferCheckedWithFeeArgs {
@@ -203,14 +203,14 @@ impl ExtensionInstructionParser for TransferFeeIx {
                 oneof::Instruction::InitializeTransferFeeConfig(
                     oneof::InitializeTransferFeeConfig {
                         accounts: InitializeTransferFeeConfigAccounts {
-                            mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
+                            mint: crate::Pubkey::new(ix.accounts[0].0),
                         },
                         args: InitializeTransferFeeConfigArgs {
                             transfer_fee_config_authority: transfer_fee_config_authority
-                                .map(|p| crate::PublicKey::new(p.to_bytes()))
+                                .map(|p| crate::Pubkey::new(p.to_bytes()))
                                 .into(),
                             withdraw_withheld_authority: withdraw_withheld_authority
-                                .map(|p| crate::PublicKey::new(p.to_bytes()))
+                                .map(|p| crate::Pubkey::new(p.to_bytes()))
                                 .into(),
                             transfer_fee_basis_points: transfer_fee_basis_points as u32,
                             maximum_fee,
@@ -225,14 +225,12 @@ impl ExtensionInstructionParser for TransferFeeIx {
                 oneof::Instruction::WithdrawWithheldTokensFromMint(
                     oneof::WithdrawWithheldTokensFromMint {
                         accounts: WithdrawWithheldTokensFromMintAccounts {
-                            mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                            fee_recipient: crate::PublicKey::new(ix.accounts[1].to_vec()),
-                            withdraw_withheld_authority: crate::PublicKey::new(
-                                ix.accounts[2].to_vec(),
-                            ),
+                            mint: crate::Pubkey::new(ix.accounts[0].0),
+                            fee_recipient: crate::Pubkey::new(ix.accounts[1].0),
+                            withdraw_withheld_authority: crate::Pubkey::new(ix.accounts[2].0),
                             multisig_signers: ix.accounts[3..]
                                 .iter()
-                                .map(|a| crate::PublicKey::new(a.to_vec()))
+                                .map(|a| crate::Pubkey::new(a.0))
                                 .collect(),
                         },
                     },
@@ -249,18 +247,16 @@ impl ExtensionInstructionParser for TransferFeeIx {
                 oneof::Instruction::WithdrawWithheldTokensFromAccounts(
                     oneof::WithdrawWithheldTokensFromAccounts {
                         accounts: WithdrawWithheldTokensFromAccountsAccounts {
-                            mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                            fee_recipient: crate::PublicKey::new(ix.accounts[1].to_vec()),
-                            withdraw_withheld_authority: crate::PublicKey::new(
-                                ix.accounts[2].to_vec(),
-                            ),
+                            mint: crate::Pubkey::new(ix.accounts[0].0),
+                            fee_recipient: crate::Pubkey::new(ix.accounts[1].0),
+                            withdraw_withheld_authority: crate::Pubkey::new(ix.accounts[2].0),
                             source_accounts: ix.accounts[3..(3 + n)]
                                 .iter()
-                                .map(|a| crate::PublicKey::new(a.to_vec()))
+                                .map(|a| crate::Pubkey::new(a.0))
                                 .collect(),
                             multisig_signers: ix.accounts[(3 + n)..]
                                 .iter()
-                                .map(|a| crate::PublicKey::new(a.to_vec()))
+                                .map(|a| crate::Pubkey::new(a.0))
                                 .collect(),
                         },
                         args: WithdrawWithheldTokensFromAccountsArgs {
@@ -276,8 +272,8 @@ impl ExtensionInstructionParser for TransferFeeIx {
                 oneof::Instruction::HarvestWithheldTokensToMint(
                     oneof::HarvestWithheldTokensToMint {
                         accounts: HarvestWithheldTokensToMintAccounts {
-                            mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                            mint_fee_acc_owner: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                            mint: crate::Pubkey::new(ix.accounts[0].0),
+                            mint_fee_acc_owner: crate::Pubkey::new(ix.accounts[1].0),
                         },
                     },
                 )
@@ -291,11 +287,11 @@ impl ExtensionInstructionParser for TransferFeeIx {
 
                 oneof::Instruction::SetTransferFee(oneof::SetTransferFee {
                     accounts: SetTransferFeeAccounts {
-                        mint: crate::PublicKey::new(ix.accounts[0].to_vec()),
-                        mint_fee_acc_owner: crate::PublicKey::new(ix.accounts[1].to_vec()),
+                        mint: crate::Pubkey::new(ix.accounts[0].0),
+                        mint_fee_acc_owner: crate::Pubkey::new(ix.accounts[1].0),
                         multisig_signers: ix.accounts[2..]
                             .iter()
-                            .map(|a| crate::PublicKey::new(a.to_vec()))
+                            .map(|a| crate::Pubkey::new(a.0))
                             .collect(),
                     },
                     args: SetTransferFeeArgs {

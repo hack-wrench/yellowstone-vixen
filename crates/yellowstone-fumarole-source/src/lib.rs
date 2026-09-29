@@ -3,6 +3,11 @@ use std::{collections::BTreeMap, num::NonZero};
 use async_trait::async_trait;
 use bytesize::ByteSize;
 use clap::ValueEnum;
+use shipstern::{
+    sources::{SourceExitStatus, SourceTrait},
+    CommitmentLevel, Error as ShipsternError,
+};
+use shipstern_core::Filters;
 use tokio::sync::{mpsc::Sender, oneshot};
 use yellowstone_fumarole_client::{
     DragonsmouthAdapterSession, FumaroleClient, FumaroleSubscribeConfig, DEFAULT_PARA_DATA_STREAMS,
@@ -12,11 +17,6 @@ use yellowstone_grpc_proto::{
     geyser::{SubscribeRequest, SubscribeUpdate},
     tonic::Status,
 };
-use yellowstone_vixen::{
-    sources::{SourceExitStatus, SourceTrait},
-    CommitmentLevel, Error as VixenError,
-};
-use yellowstone_vixen_core::Filters;
 
 /// A `Source` implementation for the Yellowstone gRPC API.
 #[derive(Debug)]
@@ -27,17 +27,17 @@ pub struct YellowstoneFumaroleSource {
 
 #[derive(Default, Copy, Debug, serde::Deserialize, Clone, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
-pub enum VixenCompressionEncoding {
+pub enum ShipsternCompressionEncoding {
     Gzip,
     #[default]
     Zstd,
 }
 
-impl From<VixenCompressionEncoding> for CompressionEncoding {
-    fn from(val: VixenCompressionEncoding) -> Self {
+impl From<ShipsternCompressionEncoding> for CompressionEncoding {
+    fn from(val: ShipsternCompressionEncoding) -> Self {
         match val {
-            VixenCompressionEncoding::Gzip => CompressionEncoding::Gzip,
-            VixenCompressionEncoding::Zstd => CompressionEncoding::Zstd,
+            ShipsternCompressionEncoding::Gzip => CompressionEncoding::Gzip,
+            ShipsternCompressionEncoding::Zstd => CompressionEncoding::Zstd,
         }
     }
 }
@@ -56,7 +56,7 @@ pub struct FumaroleConfig {
     /// max incoming decoded message size in bytes
     pub max_decoding_message_size: Option<usize>,
     /// accepted compression encoding
-    pub accept_compression: Option<VixenCompressionEncoding>,
+    pub accept_compression: Option<ShipsternCompressionEncoding>,
 }
 
 impl From<FumaroleConfig> for yellowstone_fumarole_client::config::FumaroleConfig {
@@ -85,7 +85,7 @@ impl SourceTrait for YellowstoneFumaroleSource {
         &self,
         tx: Sender<Result<SubscribeUpdate, Status>>,
         status_tx: oneshot::Sender<SourceExitStatus>,
-    ) -> Result<(), VixenError> {
+    ) -> Result<(), ShipsternError> {
         let filters = self.filters.clone();
         let subscriber_name = self.config.subscriber_name.clone();
 
@@ -94,9 +94,15 @@ impl SourceTrait for YellowstoneFumaroleSource {
             ..Default::default()
         };
 
-        let mut fumarole_client = FumaroleClient::connect(self.config.clone().into())
-            .await
-            .expect("failing to connect to fumarole");
+        let mut fumarole_client = match FumaroleClient::connect(self.config.clone().into()).await {
+            Ok(client) => client,
+            Err(e) => {
+                let msg = format!("Failed to connect to fumarole: {e}");
+                tracing::error!(%msg, "Fumarole source connection failed");
+                let _ = status_tx.send(SourceExitStatus::Error(msg));
+                return Ok(());
+            },
+        };
 
         let mut subscribe_request = SubscribeRequest::from(filters);
 
@@ -104,14 +110,28 @@ impl SourceTrait for YellowstoneFumaroleSource {
             subscribe_request.commitment = Some(commitment_level as i32);
         }
 
-        let dragonsmouth_session = fumarole_client
+        let dragonsmouth_session = match fumarole_client
             .dragonsmouth_subscribe_with_config(
                 subscriber_name,
                 subscribe_request,
                 fumarole_subscribe_config,
             )
             .await
-            .expect("failing to subscribe to fumarole");
+        {
+            Ok(session) => session,
+            Err(status) => {
+                tracing::error!(
+                    code = ?status.code(),
+                    message = status.message(),
+                    "Fumarole source subscription failed"
+                );
+                let _ = status_tx.send(SourceExitStatus::StreamError {
+                    code: status.code(),
+                    message: status.message().to_owned(),
+                });
+                return Ok(());
+            },
+        };
 
         let DragonsmouthAdapterSession {
             sink: _,
@@ -142,5 +162,46 @@ impl SourceTrait for YellowstoneFumaroleSource {
 
         let _ = status_tx.send(exit_status);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use shipstern::sources::SourceTrait;
+    use shipstern_core::Filters;
+    use tokio::sync::{mpsc, oneshot};
+
+    use super::{FumaroleConfig, YellowstoneFumaroleSource};
+
+    #[test]
+    fn connect_reports_connection_errors_instead_of_panicking() {
+        let runtime = tokio::runtime::Runtime::new().expect("runtime should build");
+
+        runtime.block_on(async {
+            let source = YellowstoneFumaroleSource::new(
+                FumaroleConfig {
+                    endpoint: "http://127.0.0.1:9".to_string(),
+                    subscriber_name: "test-subscriber".to_string(),
+                    ..FumaroleConfig::default()
+                },
+                Filters::new(HashMap::new()),
+            );
+            let (tx, mut rx) = mpsc::channel(1);
+            let (status_tx, status_rx) = oneshot::channel();
+
+            source
+                .connect(tx, status_tx)
+                .await
+                .expect("connect should report connection failure through source status");
+
+            let status = status_rx.await.expect("source status should be sent");
+            let shipstern::sources::SourceExitStatus::Error(msg) = status else {
+                panic!("expected source error, got {status:?}");
+            };
+            assert!(msg.contains("Failed to connect to fumarole"));
+            assert!(rx.try_recv().is_err());
+        });
     }
 }

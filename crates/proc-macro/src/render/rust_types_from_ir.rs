@@ -5,9 +5,12 @@ use quote::{format_ident, quote};
 use syn::LitStr;
 
 use crate::intermediate_representation::{
-    FieldIr, FieldTypeIr, LabelIr, OneofIr, OneofKindIr, ScalarIr, TypeIr, TypeKindIr,
+    FieldIr, FieldTypeIr, LabelIr, OneofIr, OneofKindIr, OptionEncodingIr, OptionPrefixIr,
+    ScalarIr, TypeIr, TypeKindIr,
 };
 
+// Generated types derive `serde::Serialize`/`Deserialize` behind the `serde` feature flag.
+// Enable it in consumer crates that need JSON (or other serde-format) conversion.
 pub fn rust_types_from_ir(schema_ir: &crate::intermediate_representation::SchemaIr) -> TokenStream {
     let mut out = TokenStream::new();
 
@@ -17,6 +20,28 @@ pub fn rust_types_from_ir(schema_ir: &crate::intermediate_representation::Schema
         .map(|oneof_ir| oneof_ir.parent_message.as_str())
         .collect();
 
+    // Oneof parents from dispatch oneofs only (InstructionDispatch / EventDispatch).
+    // Used to exclude dispatch wrapper types (e.g. "Instructions") from the payload
+    // type lists. We must NOT use the full `oneof_parents` set here because defined
+    // type enum names (e.g. "SetRealmConfigItemArgs") would accidentally exclude
+    // instruction/event payload types that share the same name.
+    let dispatch_oneof_parents: HashSet<&str> = schema_ir
+        .oneofs
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.kind,
+                OneofKindIr::InstructionDispatch | OneofKindIr::EventDispatch
+            )
+        })
+        .map(|o| o.parent_message.as_str())
+        .collect();
+
+    // Names that exist as both a top-level defined type and an instruction/event type.
+    // Inside submodules, a struct with a colliding name can't reference itself (no boxing),
+    // so any `Message("SwapArgs")` field inside `SwapArgs` must mean the top-level type.
+    let collisions = schema_ir.colliding_names();
+
     // Collect instruction-kind type names (these go inside the instruction module)
     let instruction_type_names: HashSet<&str> = schema_ir
         .types
@@ -25,15 +50,39 @@ pub fn rust_types_from_ir(schema_ir: &crate::intermediate_representation::Schema
         .map(|t| t.name.as_str())
         .collect();
 
-    // Render non-instruction types at top level (exclude oneof parents, rendered separately).
+    // Collect event-kind type names (these go inside the event module)
+    let event_type_names: HashSet<&str> = schema_ir
+        .types
+        .iter()
+        .filter(|t| t.kind == TypeKindIr::Event)
+        .map(|t| t.name.as_str())
+        .collect();
+
+    // Collect account-kind names so we can skip DefinedTypes that share the same name.
+    // This happens when an IDL declares both an account and a type with the same name
+    // (e.g. `MarginAccount`). The Account version is authoritative; emitting both would
+    // produce duplicate struct definitions.
+    let account_type_names: HashSet<&str> = schema_ir
+        .types
+        .iter()
+        .filter(|t| matches!(t.kind, TypeKindIr::Account { .. }))
+        .map(|t| t.name.as_str())
+        .collect();
+
+    // Render non-instruction, non-event types at top level (exclude oneof parents, rendered separately).
     // Use kind-based filtering (not name-based) so that defined types whose names
-    // collide with instruction wrapper types are still rendered at the top level.
+    // collide with instruction/event wrapper types are still rendered at the top level.
     for t in &schema_ir.types {
         if oneof_parents.contains(t.name.as_str()) {
             continue;
         }
 
-        if t.kind == TypeKindIr::Instruction {
+        if t.kind == TypeKindIr::Instruction || t.kind == TypeKindIr::Event {
+            continue;
+        }
+
+        // Skip DefinedTypes shadowed by an Account of the same name.
+        if t.kind == TypeKindIr::DefinedType && account_type_names.contains(t.name.as_str()) {
             continue;
         }
 
@@ -48,13 +97,36 @@ pub fn rust_types_from_ir(schema_ir: &crate::intermediate_representation::Schema
                     .types
                     .iter()
                     .filter(|t| t.kind == TypeKindIr::Instruction)
-                    .filter(|t| !oneof_parents.contains(t.name.as_str()))
+                    .filter(|t| !dispatch_oneof_parents.contains(t.name.as_str()))
                     .collect();
 
-                out.extend(render_instruction_dispatch(
+                out.extend(render_dispatch(
                     oneof,
                     &ix_types,
                     &instruction_type_names,
+                    &collisions,
+                    &oneof.parent_message,
+                    "instruction",
+                    "Instruction",
+                ));
+            },
+            OneofKindIr::EventDispatch => {
+                let ev_types: Vec<&TypeIr> = schema_ir
+                    .types
+                    .iter()
+                    .filter(|t| t.kind == TypeKindIr::Event)
+                    .filter(|t| !dispatch_oneof_parents.contains(t.name.as_str()))
+                    .collect();
+
+                // Use "Events" as the Rust wrapper name (not "ProgramEvents" which is the proto name)
+                out.extend(render_dispatch(
+                    oneof,
+                    &ev_types,
+                    &event_type_names,
+                    &collisions,
+                    "Events",
+                    "event",
+                    "Event",
                 ));
             },
             OneofKindIr::Enum => {
@@ -76,15 +148,21 @@ fn render_struct_type(t: &TypeIr, local_names: Option<&HashSet<&str>>) -> TokenS
         .collect();
 
     if cfg!(feature = "proto") {
+        let prost_impl = super::manual_prost::manual_prost_struct_impl(t, local_names);
+
         quote! {
-            #[derive(Clone, PartialEq, ::borsh::BorshDeserialize, ::borsh::BorshSerialize, ::prost::Message)]
+            #[derive(Clone, PartialEq, ::borsh::BorshDeserialize, ::borsh::BorshSerialize)]
+            #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
             pub struct #ident {
                 #(#fields),*
             }
+
+            #prost_impl
         }
     } else {
         quote! {
             #[derive(Clone, Debug, PartialEq, ::borsh::BorshDeserialize, ::borsh::BorshSerialize)]
+            #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
             pub struct #ident {
                 #(#fields),*
             }
@@ -93,54 +171,99 @@ fn render_struct_type(t: &TypeIr, local_names: Option<&HashSet<&str>>) -> TokenS
 }
 
 ///
-/// Render instruction dispatch: module-wrapped.
+/// Render a dispatch module: wrapper struct + inner module with enum + payload types.
 ///
 /// Generates:
-/// - `pub mod instruction { pub enum Instruction { ... } /* + payload types */ }`
-/// - Wrapper struct `Instructions` with `instruction: Option<instruction::Instruction>`
-/// - Custom Borsh impls for `Instructions`
+/// - `pub mod <mod_name> { pub enum <enum_name> { ... } /* + payload types */ }`
+/// - Wrapper struct with a single field of the enum type (non-Option)
+/// - Custom Borsh impls for the wrapper
+/// - When proto: manual `prost::Message` impl (no prost derive on the wrapper)
 ///
-fn render_instruction_dispatch(
+fn render_dispatch(
     oneof_ir: &OneofIr,
-    ix_types: &[&TypeIr],
+    payload_types: &[&TypeIr],
     local_names: &HashSet<&str>,
+    collisions: &std::collections::HashSet<String>,
+    rust_wrapper_name: &str,
+    mod_name: &str,
+    enum_name: &str,
 ) -> TokenStream {
-    let parent_ident = format_ident!("{}", oneof_ir.parent_message); // "Instructions"
-    let mod_ident = format_ident!("instruction");
-    let oneof_ident = format_ident!("Instruction");
+    let wrapper_ident = format_ident!("{}", rust_wrapper_name);
+    let mod_ident = format_ident!("{}", mod_name);
+    let oneof_ident = format_ident!("{}", enum_name);
     let field_ident = format_ident!("{}", oneof_ir.field_name);
 
-    // Render instruction types inside the module
-    let module_types: Vec<TokenStream> = ix_types
+    // Wrapper types (e.g. `Swap`) have fields that always reference local instruction
+    // types (`SwapAccounts`, `SwapArgs`). Non-wrapper types (like `SwapArgs` itself)
+    // may reference top-level defined types. When a name collides (instruction type
+    // and defined type share the same name), non-wrapper types need collision-adjusted
+    // `local_names` so their fields resolve to `super::`.
+    let wrapper_names: HashSet<&str> = oneof_ir
+        .variants
         .iter()
-        .map(|t| render_struct_type(t, Some(local_names)))
+        .map(|v| v.message_type.as_str())
         .collect();
 
+    let collision_adjusted_locals: HashSet<&str> = local_names
+        .iter()
+        .copied()
+        .filter(|n| !collisions.contains(*n))
+        .collect();
+
+    let module_types: Vec<TokenStream> = payload_types
+        .iter()
+        .map(|t| {
+            if wrapper_names.contains(t.name.as_str()) {
+                render_struct_type(t, Some(local_names))
+            } else {
+                render_struct_type(t, Some(&collision_adjusted_locals))
+            }
+        })
+        .collect();
+
+    // Re-export top-level types for variants whose `<IxName>Args` (or
+    // `<EvName>Args`) wrapper was suppressed because it would collide with a
+    // top-level DefinedType. The variant's `args:` field then resolves to the
+    // re-exported (FLAT) type, matching what the proto schema declares — so
+    // encode/decode through the schema agree byte-for-byte. See
+    // `build_instructions_schema::build_instruction_messages` for the
+    // suppression rule.
+    let module_reexports: Vec<TokenStream> = oneof_ir
+        .variants
+        .iter()
+        .filter_map(|v| {
+            let args_name = format!("{}Args", v.message_type);
+
+            if local_names.contains(args_name.as_str()) {
+                None
+            } else {
+                let args_ident = format_ident!("{}", args_name);
+
+                Some(quote! { pub use super::#args_ident; })
+            }
+        })
+        .collect();
+
+    // Struct variants: `Swap { accounts: SwapAccounts, args: SwapArgs }`
     let variants = oneof_ir.variants.iter().map(|v| {
         let v_ident = format_ident!("{}", v.variant_name);
-        let msg_ident = format_ident!("{}", v.message_type);
-        let tag = v.tag;
+        let accounts_ident = format_ident!("{}Accounts", v.message_type);
+        let args_ident = format_ident!("{}Args", v.message_type);
 
-        if cfg!(feature = "proto") {
-            quote! {
-                #[prost(message, tag = #tag)]
-                #v_ident(#msg_ident)
-            }
-        } else {
-            quote! {
-                #v_ident(#msg_ident)
-            }
+        quote! {
+            #v_ident { accounts: #accounts_ident, args: #args_ident }
         }
     });
 
     let borsh_serialize_arms = oneof_ir.variants.iter().enumerate().map(|(i, v)| {
         let disc = i as u8;
         let v_ident = format_ident!("{}", v.variant_name);
+        let msg_ident = format_ident!("{}", v.message_type);
 
         quote! {
-            ::core::option::Option::Some(#mod_ident::#oneof_ident::#v_ident(v)) => {
+            #mod_ident::#oneof_ident::#v_ident { accounts, args } => {
                 ::borsh::BorshSerialize::serialize(&#disc, writer)?;
-                ::borsh::BorshSerialize::serialize(v, writer)
+                ::borsh::BorshSerialize::serialize(&(#mod_ident::#msg_ident { accounts: accounts.clone(), args: args.clone() }), writer)
             }
         }
     });
@@ -148,86 +271,73 @@ fn render_instruction_dispatch(
     let borsh_deserialize_arms = oneof_ir.variants.iter().enumerate().map(|(i, v)| {
         let disc = i as u8;
         let v_ident = format_ident!("{}", v.variant_name);
+        let msg_ident = format_ident!("{}", v.message_type);
 
         quote! {
             #disc => {
-                let v = ::borsh::BorshDeserialize::deserialize_reader(reader)?;
+                let v: #mod_ident::#msg_ident = ::borsh::BorshDeserialize::deserialize_reader(reader)?;
 
-                ::core::option::Option::Some(#mod_ident::#oneof_ident::#v_ident(v))
+                #mod_ident::#oneof_ident::#v_ident { accounts: v.accounts, args: v.args }
             }
         }
     });
 
-    let struct_and_mod = if cfg!(feature = "proto") {
-        let tags_lit = {
-            let tags_list = oneof_ir
-                .variants
-                .iter()
-                .map(|v| v.tag.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
+    let proto_impls = if cfg!(feature = "proto") {
+        let oneof_impl =
+            super::manual_prost::manual_prost_oneof_impl(oneof_ir, &mod_ident, &oneof_ident);
 
-            LitStr::new(&tags_list, Span::call_site())
-        };
+        let message_impl = super::manual_prost::manual_prost_message_impl(
+            &wrapper_ident,
+            &field_ident,
+            &mod_ident,
+            &oneof_ident,
+        );
 
-        let oneof_lit = LitStr::new("instruction::Instruction", Span::call_site());
-
-        quote! {
-            #[derive(Clone, PartialEq, ::prost::Message)]
-            pub struct #parent_ident {
-                #[prost(oneof = #oneof_lit, tags = #tags_lit)]
-                pub #field_ident: ::core::option::Option<#mod_ident::#oneof_ident>,
-            }
-
-            pub mod #mod_ident {
-                #(#module_types)*
-
-                #[derive(Clone, PartialEq, ::prost::Oneof)]
-                pub enum #oneof_ident {
-                    #(#variants),*
-                }
-            }
-        }
+        quote! { #oneof_impl #message_impl }
     } else {
-        quote! {
-            #[derive(Clone, Debug, PartialEq)]
-            pub struct #parent_ident {
-                pub #field_ident: ::core::option::Option<#mod_ident::#oneof_ident>,
-            }
+        quote! {}
+    };
 
-            pub mod #mod_ident {
-                #(#module_types)*
-
-                #[derive(Clone, Debug, PartialEq)]
-                pub enum #oneof_ident {
-                    #(#variants),*
-                }
-            }
-        }
+    // Debug is manual in proto mode (provided by manual_prost_message_impl).
+    let parent_debug_derive = if cfg!(feature = "proto") {
+        quote! {}
+    } else {
+        quote! { Debug, }
     };
 
     quote! {
-        #struct_and_mod
+        #[derive(Clone, #parent_debug_derive PartialEq)]
+        #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+        pub struct #wrapper_ident {
+            pub #field_ident: #mod_ident::#oneof_ident,
+        }
 
-        impl ::borsh::BorshSerialize for #parent_ident {
+        pub mod #mod_ident {
+            #(#module_reexports)*
+
+            #(#module_types)*
+
+            #[derive(Clone, Debug, PartialEq)]
+            #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+            pub enum #oneof_ident {
+                #(#variants),*
+            }
+        }
+
+        #proto_impls
+
+        impl ::borsh::BorshSerialize for #wrapper_ident {
             fn serialize<W: ::borsh::io::Write>(
                 &self,
                 writer: &mut W
             ) -> ::core::result::Result<(), ::borsh::io::Error> {
                 match &self.#field_ident {
                     #(#borsh_serialize_arms,)*
-
-                    ::core::option::Option::None => {
-                        ::core::result::Result::Err(::borsh::io::Error::new(
-                            ::borsh::io::ErrorKind::InvalidData,
-                            "oneof field is None"
-                        ))
-                    }
                 }
             }
         }
 
-        impl ::borsh::BorshDeserialize for #parent_ident {
+        impl ::borsh::BorshDeserialize for #wrapper_ident {
             fn deserialize_reader<R: ::borsh::io::Read>(
                 reader: &mut R
             ) -> ::core::result::Result<Self, ::borsh::io::Error> {
@@ -239,10 +349,11 @@ fn render_instruction_dispatch(
                     _ => {
                         return ::core::result::Result::Err(::borsh::io::Error::new(
                             ::borsh::io::ErrorKind::InvalidData,
-                            "invalid discriminant"
+                            format!("invalid discriminant {disc} (type {})", stringify!(#wrapper_ident))
                         ));
                     }
                 };
+
                 ::core::result::Result::Ok(Self { #field_ident })
             }
         }
@@ -259,6 +370,7 @@ fn render_enum_oneof(oneof_ir: &OneofIr) -> TokenStream {
     let variants = oneof_ir.variants.iter().map(|v| {
         let v_ident = format_ident!("{}", v.variant_name);
         let msg_ident = format_ident!("{}", v.message_type);
+
         let tag = v.tag;
 
         if cfg!(feature = "proto") {
@@ -278,7 +390,7 @@ fn render_enum_oneof(oneof_ir: &OneofIr) -> TokenStream {
         let v_ident = format_ident!("{}", v.variant_name);
 
         quote! {
-            ::core::option::Option::Some(#mod_ident::#oneof_ident::#v_ident(v)) => {
+            #mod_ident::#oneof_ident::#v_ident(v) => {
                 ::borsh::BorshSerialize::serialize(&#disc, writer)?;
                 ::borsh::BorshSerialize::serialize(v, writer)
             }
@@ -293,61 +405,74 @@ fn render_enum_oneof(oneof_ir: &OneofIr) -> TokenStream {
             #disc => {
                 let v = ::borsh::BorshDeserialize::deserialize_reader(reader)?;
 
-                ::core::option::Option::Some(#mod_ident::#oneof_ident::#v_ident(v))
+                #mod_ident::#oneof_ident::#v_ident(v)
             }
         }
     });
 
-    let struct_and_mod = if cfg!(feature = "proto") {
-        let tags_lit = {
-            let tags_list = oneof_ir
-                .variants
-                .iter()
-                .map(|v| v.tag.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            LitStr::new(&tags_list, Span::call_site())
-        };
-
-        let oneof_lit = {
-            let oneof_path = format!("{}::{}", mod_ident, oneof_ident);
-
-            LitStr::new(&oneof_path, Span::call_site())
-        };
-
+    let enum_derive = if cfg!(feature = "proto") {
         quote! {
-            #[derive(Clone, PartialEq, ::prost::Message)]
-            pub struct #parent_ident {
-                #[prost(oneof = #oneof_lit, tags = #tags_lit)]
-                pub #field_ident: ::core::option::Option<#mod_ident::#oneof_ident>,
-            }
-
-            pub mod #mod_ident {
-                #[derive(Clone, PartialEq, ::prost::Oneof)]
-                pub enum #oneof_ident {
-                    #(#variants),*
-                }
-            }
+            #[derive(Clone, PartialEq, ::prost::Oneof)]
+            #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
         }
     } else {
         quote! {
             #[derive(Clone, Debug, PartialEq)]
-            pub struct #parent_ident {
-                pub #field_ident: ::core::option::Option<#mod_ident::#oneof_ident>,
-            }
-
-            pub mod #mod_ident {
-                #[derive(Clone, Debug, PartialEq)]
-                pub enum #oneof_ident {
-                    #(#variants),*
-                }
-            }
+            #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
         }
     };
 
+    let proto_impls = if cfg!(feature = "proto") {
+        let first_variant = &oneof_ir.variants[0];
+
+        let first_variant_ident = format_ident!("{}", first_variant.variant_name);
+        let first_variant_msg = format_ident!("{}", first_variant.message_type);
+
+        let message_impl = super::manual_prost::manual_prost_message_impl(
+            &parent_ident,
+            &field_ident,
+            &mod_ident,
+            &oneof_ident,
+        );
+
+        quote! {
+            #message_impl
+
+            impl ::core::default::Default for #parent_ident {
+                fn default() -> Self {
+                    Self {
+                        #field_ident: #mod_ident::#oneof_ident::#first_variant_ident(
+                            <#first_variant_msg as ::core::default::Default>::default(),
+                        ),
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let debug_derive = if cfg!(feature = "proto") {
+        quote! {}
+    } else {
+        quote! { Debug, }
+    };
+
     quote! {
-        #struct_and_mod
+        #[derive(Clone, #debug_derive PartialEq)]
+        #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+        pub struct #parent_ident {
+            pub #field_ident: #mod_ident::#oneof_ident,
+        }
+
+        pub mod #mod_ident {
+            #enum_derive
+            pub enum #oneof_ident {
+                #(#variants),*
+            }
+        }
+
+        #proto_impls
 
         impl ::borsh::BorshSerialize for #parent_ident {
             fn serialize<W: ::borsh::io::Write>(
@@ -356,13 +481,6 @@ fn render_enum_oneof(oneof_ir: &OneofIr) -> TokenStream {
             ) -> ::core::result::Result<(), ::borsh::io::Error> {
                 match &self.#field_ident {
                     #(#borsh_serialize_arms,)*
-
-                    ::core::option::Option::None => {
-                        ::core::result::Result::Err(::borsh::io::Error::new(
-                            ::borsh::io::ErrorKind::InvalidData,
-                            "oneof field is None"
-                        ))
-                    }
                 }
             }
         }
@@ -379,40 +497,47 @@ fn render_enum_oneof(oneof_ir: &OneofIr) -> TokenStream {
                     _ => {
                         return ::core::result::Result::Err(::borsh::io::Error::new(
                             ::borsh::io::ErrorKind::InvalidData,
-                            "invalid discriminant"
+                            format!("invalid enum discriminant {disc} (type {})", stringify!(#parent_ident))
                         ));
                     }
                 };
+
                 ::core::result::Result::Ok(Self { #field_ident })
             }
         }
     }
 }
 
+///
 /// Render a single struct field.
 ///
 /// `local_names`: when `Some`, we are inside a submodule. Message types not in the set
 /// and borsh helper paths get `super::` prefixed.
+///
 pub fn render_field(f: &FieldIr, local_names: Option<&HashSet<&str>>) -> TokenStream {
     let name = format_ident!("{}", f.name);
-    let tag = f.tag;
     let in_module = local_names.is_some();
     let path_prefix = if in_module { "super::" } else { "" };
 
-    // PublicKey is rendered as a message type (PublicKey wrapper), not a scalar.
-    let is_pubkey = matches!(&f.field_type, FieldTypeIr::Scalar(ScalarIr::PublicKey));
+    // Custom borsh attrs for fields whose on-chain encoding differs from the Rust type.
+    // Public Rust types and protobuf fields stay independent of these wire codecs.
+    let borsh_attr = if matches!(
+        f.field_type,
+        FieldTypeIr::Scalar(
+            ScalarIr::SizePrefixedBytes { .. } | ScalarIr::SizePrefixedString { .. }
+        )
+    ) {
+        super::size_prefixed_bytes::attrs(f, path_prefix)
+    } else {
+        let option = option_borsh_attrs(&f.label, &f.field_type, path_prefix);
 
-    // Custom borsh attrs for fields whose on-chain encoding differs from the Rust type
-    let borsh_attr = {
-        let fixed = fixed_bytes_borsh_attrs(&f.label, &f.field_type, path_prefix);
-
-        if !fixed.is_empty() {
-            fixed
+        if !option.is_empty() {
+            option
         } else {
-            let widen = widen_borsh_attrs(&f.label, &f.field_type, path_prefix);
+            let fixed = fixed_bytes_borsh_attrs(&f.label, &f.field_type, path_prefix);
 
-            if !widen.is_empty() {
-                widen
+            if !fixed.is_empty() {
+                fixed
             } else {
                 let float = float_borsh_attrs(&f.label, &f.field_type, path_prefix);
 
@@ -420,7 +545,6 @@ pub fn render_field(f: &FieldIr, local_names: Option<&HashSet<&str>>) -> TokenSt
                     float
                 } else {
                     // For FixedArray, we always need a custom borsh attr (no length prefix).
-                    // If none of the specialized attrs matched, use the generic fixed-array helper.
                     fixed_array_default_borsh_attrs(&f.label, path_prefix)
                 }
             }
@@ -442,152 +566,182 @@ pub fn render_field(f: &FieldIr, local_names: Option<&HashSet<&str>>) -> TokenSt
         }
     };
 
-    // Without proto, emit plain fields with no prost attributes
-    if !cfg!(feature = "proto") {
-        return match (&f.label, &f.field_type) {
-            (LabelIr::Singular, FieldTypeIr::Message(msg)) => {
-                let ty = resolve_msg(msg);
-
-                quote! { #borsh_attr pub #name: #ty }
-            },
-            (LabelIr::Singular, _) if is_pubkey => {
-                let (_, rust_type) = map_ir_type_to_prost(&f.field_type, in_module);
-
-                quote! { #borsh_attr pub #name: #rust_type }
-            },
-            (LabelIr::Singular, field_type) => {
-                let (_, rust_type) = map_ir_type_to_prost(field_type, in_module);
-
-                quote! { #borsh_attr pub #name: #rust_type }
-            },
-            (LabelIr::Optional, FieldTypeIr::Message(msg)) => {
-                let ty = resolve_msg(msg);
-
-                quote! { pub #name: ::core::option::Option<#ty> }
-            },
-            (LabelIr::Optional, field_type) => {
-                let (_, rust_type) = map_ir_type_to_prost(field_type, in_module);
-
-                quote! { #borsh_attr pub #name: ::core::option::Option<#rust_type> }
-            },
-            (LabelIr::Repeated | LabelIr::FixedArray(_), FieldTypeIr::Message(msg)) => {
-                let ty = resolve_msg(msg);
-
-                quote! { #borsh_attr pub #name: Vec<#ty> }
-            },
-            (LabelIr::Repeated | LabelIr::FixedArray(_), field_type) => {
-                let (_, rust_type) = map_ir_type_to_prost(field_type, in_module);
-
-                quote! { #borsh_attr pub #name: Vec<#rust_type> }
-            },
-        };
-    }
-
+    // Both proto and non-proto paths now use native types and no prost attributes.
+    // The manual prost::Message impl (generated by manual_prost_struct_impl) handles encoding.
     match (&f.label, &f.field_type) {
         (LabelIr::Singular, FieldTypeIr::Message(msg)) => {
             let ty = resolve_msg(msg);
 
-            quote! {
-                #[prost(message, required, tag = #tag)]
-                #borsh_attr
-                pub #name: #ty
-            }
+            quote! { #borsh_attr pub #name: #ty }
         },
-
-        (LabelIr::Singular, _) if is_pubkey => {
-            let (_, rust_type) = map_ir_type_to_prost(&f.field_type, in_module);
-
-            quote! {
-                #[prost(message, required, tag = #tag)]
-                #borsh_attr
-                pub #name: #rust_type
-            }
-        },
-
         (LabelIr::Singular, field_type) => {
-            let (prost_type, rust_type) = map_ir_type_to_prost(field_type, in_module);
+            let rust_type = map_ir_type_to_native(field_type, in_module);
 
-            quote! {
-                #[prost(#prost_type, tag = #tag)]
-                #borsh_attr
-                pub #name: #rust_type
-            }
+            quote! { #borsh_attr pub #name: #rust_type }
         },
-
-        (LabelIr::Optional, FieldTypeIr::Message(msg)) => {
+        (LabelIr::Optional(_), FieldTypeIr::Message(msg)) => {
             let ty = resolve_msg(msg);
 
-            quote! {
-                #[prost(message, optional, tag = #tag)]
-                pub #name: ::core::option::Option<#ty>
-            }
+            quote! { #borsh_attr pub #name: ::core::option::Option<#ty> }
         },
+        (LabelIr::Optional(_), field_type) => {
+            let rust_type = map_ir_type_to_native(field_type, in_module);
 
-        (LabelIr::Optional, _) if is_pubkey => {
-            let (_, rust_type) = map_ir_type_to_prost(&f.field_type, in_module);
-
-            quote! {
-                #[prost(message, optional, tag = #tag)]
-                #borsh_attr
-                pub #name: ::core::option::Option<#rust_type>
-            }
+            quote! { #borsh_attr pub #name: ::core::option::Option<#rust_type> }
         },
-
-        (LabelIr::Optional, field_type) => {
-            let (prost_type, rust_type) = map_ir_type_to_prost(field_type, in_module);
-
-            quote! {
-                #[prost(#prost_type, optional, tag = #tag)]
-                #borsh_attr
-                pub #name: ::core::option::Option<#rust_type>
-            }
-        },
-
         (LabelIr::Repeated | LabelIr::FixedArray(_), FieldTypeIr::Message(msg)) => {
             let ty = resolve_msg(msg);
 
-            quote! {
-                #[prost(message, repeated, tag = #tag)]
-                #borsh_attr
-                pub #name: Vec<#ty>
-            }
+            quote! { #borsh_attr pub #name: Vec<#ty> }
         },
-
-        (LabelIr::Repeated | LabelIr::FixedArray(_), _) if is_pubkey => {
-            let (_, rust_type) = map_ir_type_to_prost(&f.field_type, in_module);
-
-            quote! {
-                #[prost(message, repeated, tag = #tag)]
-                #borsh_attr
-                pub #name: Vec<#rust_type>
-            }
-        },
-
         (LabelIr::Repeated | LabelIr::FixedArray(_), field_type) => {
-            let (prost_type, rust_type) = map_ir_type_to_prost(field_type, in_module);
+            let rust_type = map_ir_type_to_native(field_type, in_module);
 
-            quote! {
-                #[prost(#prost_type, repeated, tag = #tag)]
-                #borsh_attr
-                pub #name: Vec<#rust_type>
-            }
+            quote! { #borsh_attr pub #name: Vec<#rust_type> }
         },
     }
 }
 
-///
+/// Returns custom Borsh hooks for Codama options that do not use Rust Borsh's
+/// native u8-tag encoding. This includes non-u8 prefixes and fixed options,
+/// whose `None` representation includes zero padding for the item size.
+fn option_borsh_attrs(label: &LabelIr, field_type: &FieldTypeIr, path_prefix: &str) -> TokenStream {
+    let LabelIr::Optional(encoding) = label else {
+        return quote! {};
+    };
+
+    if encoding.uses_native_borsh() {
+        return quote! {};
+    }
+
+    let padding = encoding.none_padding.unwrap_or(0);
+    let (deserialize, serialize) = option_borsh_paths(encoding, field_type, path_prefix, padding);
+    let deserialize = LitStr::new(&deserialize, Span::call_site());
+    let serialize = LitStr::new(&serialize, Span::call_site());
+
+    quote! {
+        #[borsh(
+            deserialize_with = #deserialize,
+            serialize_with = #serialize
+        )]
+    }
+}
+
+fn option_borsh_paths(
+    encoding: &OptionEncodingIr,
+    field_type: &FieldTypeIr,
+    path_prefix: &str,
+    padding: usize,
+) -> (String, String) {
+    let names = match field_type {
+        FieldTypeIr::Scalar(ScalarIr::FixedBytes(size)) => {
+            return option_fixed_bytes_borsh_paths(encoding, *size, path_prefix, padding);
+        },
+        FieldTypeIr::Scalar(ScalarIr::Float) => {
+            return option_float_borsh_paths(encoding, "f32", path_prefix, padding);
+        },
+        FieldTypeIr::Scalar(ScalarIr::Double) => {
+            return option_float_borsh_paths(encoding, "f64", path_prefix, padding);
+        },
+        _ => ("borsh_deserialize_option", "borsh_serialize_option"),
+    };
+
+    match &encoding.prefix {
+        OptionPrefixIr::FixedWidth {
+            byte_len,
+            one_value,
+            big_endian,
+        } => (
+            format!(
+                "{path_prefix}{}::<_, {byte_len}, {one_value}, {big_endian}, {padding}, _>",
+                names.0
+            ),
+            format!(
+                "{path_prefix}{}::<_, {byte_len}, {one_value}, {big_endian}, {padding}, _>",
+                names.1
+            ),
+        ),
+        OptionPrefixIr::ShortU16 => (
+            format!("{path_prefix}borsh_deserialize_short_u16_option::<_, {padding}, _>"),
+            format!("{path_prefix}borsh_serialize_short_u16_option::<_, {padding}, _>"),
+        ),
+    }
+}
+
+fn option_fixed_bytes_borsh_paths(
+    encoding: &OptionEncodingIr,
+    size: usize,
+    path_prefix: &str,
+    padding: usize,
+) -> (String, String) {
+    match &encoding.prefix {
+        OptionPrefixIr::FixedWidth {
+            byte_len,
+            one_value,
+            big_endian,
+        } => (
+            format!(
+                "{path_prefix}borsh_deserialize_option_fixed_bytes::<{size}, {byte_len}, \
+                 {one_value}, {big_endian}, {padding}, _>"
+            ),
+            format!(
+                "{path_prefix}borsh_serialize_option_fixed_bytes::<{size}, {byte_len}, \
+                 {one_value}, {big_endian}, {padding}, _>"
+            ),
+        ),
+        OptionPrefixIr::ShortU16 => (
+            format!(
+                "{path_prefix}borsh_deserialize_short_u16_option_fixed_bytes::<{size}, {padding}, \
+                 _>"
+            ),
+            format!(
+                "{path_prefix}borsh_serialize_short_u16_option_fixed_bytes::<{size}, {padding}, _>"
+            ),
+        ),
+    }
+}
+
+fn option_float_borsh_paths(
+    encoding: &OptionEncodingIr,
+    suffix: &str,
+    path_prefix: &str,
+    padding: usize,
+) -> (String, String) {
+    match &encoding.prefix {
+        OptionPrefixIr::FixedWidth {
+            byte_len,
+            one_value,
+            big_endian,
+        } => (
+            format!(
+                "{path_prefix}borsh_deserialize_option_{suffix}_permissive::<{byte_len}, \
+                 {one_value}, {big_endian}, {padding}, _>"
+            ),
+            format!(
+                "{path_prefix}borsh_serialize_option_{suffix}_permissive::<{byte_len}, \
+                 {one_value}, {big_endian}, {padding}, _>"
+            ),
+        ),
+        OptionPrefixIr::ShortU16 => (
+            format!(
+                "{path_prefix}borsh_deserialize_short_u16_option_{suffix}_permissive::<{padding}, \
+                 _>"
+            ),
+            format!(
+                "{path_prefix}borsh_serialize_short_u16_option_{suffix}_permissive::<{padding}, _>"
+            ),
+        ),
+    }
+}
+
 /// Returns `#[borsh(deserialize_with = "...", serialize_with = "...")]` for fixed-size byte fields
-/// (Pubkey and FixedBytes), or an empty TokenStream for all other field types.
-///
+/// (FixedBytes), or an empty TokenStream for all other field types.
 fn fixed_bytes_borsh_attrs(
     label: &LabelIr,
     field_type: &FieldTypeIr,
     path_prefix: &str,
 ) -> TokenStream {
     match field_type {
-        FieldTypeIr::Scalar(ScalarIr::PublicKey) => {
-            return pubkey_borsh_attrs(label, path_prefix);
-        },
         FieldTypeIr::Scalar(ScalarIr::FixedBytes(_)) => {},
         _ => return quote! {},
     }
@@ -637,7 +791,7 @@ fn fixed_bytes_borsh_attrs(
                 serialize_with = #serialize_path
             )]
         },
-        LabelIr::Optional => quote! {
+        LabelIr::Optional(_) => quote! {
             #[borsh(
                 deserialize_with = #deserialize_opt_path,
                 serialize_with = #serialize_opt_path
@@ -667,88 +821,11 @@ fn fixed_bytes_borsh_attrs(
     }
 }
 
-/// Returns borsh attrs for Pubkey fields, routing to Pubkey-wrapping helpers.
-fn pubkey_borsh_attrs(label: &LabelIr, path_prefix: &str) -> TokenStream {
-    let (d, s) = match label {
-        LabelIr::Singular => (
-            format!("{path_prefix}borsh_deserialize_pubkey"),
-            format!("{path_prefix}borsh_serialize_pubkey"),
-        ),
-        LabelIr::Optional => (
-            format!("{path_prefix}borsh_deserialize_opt_pubkey"),
-            format!("{path_prefix}borsh_serialize_opt_pubkey"),
-        ),
-        LabelIr::Repeated => (
-            format!("{path_prefix}borsh_deserialize_vec_pubkey"),
-            format!("{path_prefix}borsh_serialize_vec_pubkey"),
-        ),
-        LabelIr::FixedArray(n) => (
-            format!("{path_prefix}borsh_deserialize_fixed_array_pubkey::<{n}, _>"),
-            format!("{path_prefix}borsh_serialize_fixed_array_pubkey::<{n}, _>"),
-        ),
-    };
-
-    let d_lit = LitStr::new(&d, Span::call_site());
-    let s_lit = LitStr::new(&s, Span::call_site());
-
-    quote! {
-        #[borsh(
-            deserialize_with = #d_lit,
-            serialize_with = #s_lit
-        )]
-    }
-}
-
-/// Returns `#[borsh(deserialize_with = "...", serialize_with = "...")]` for integer fields
-/// that are widened from their on-chain size to a proto-compatible Rust type.
-fn widen_borsh_attrs(label: &LabelIr, field_type: &FieldTypeIr, path_prefix: &str) -> TokenStream {
-    let suffixes = match field_type {
-        FieldTypeIr::Scalar(ScalarIr::U8) => ("u8_as_u32", "u32_as_u8"),
-        FieldTypeIr::Scalar(ScalarIr::U16 | ScalarIr::ShortU16) => ("u16_as_u32", "u32_as_u16"),
-        FieldTypeIr::Scalar(ScalarIr::I8) => ("i8_as_i32", "i32_as_i8"),
-        FieldTypeIr::Scalar(ScalarIr::I16) => ("i16_as_i32", "i32_as_i16"),
-        _ => return quote! {},
-    };
-
-    let (deserialize_fn_name, serialize_fn_name) = match label {
-        LabelIr::Singular => (
-            format!("{path_prefix}borsh_deserialize_{}", suffixes.0),
-            format!("{path_prefix}borsh_serialize_{}", suffixes.1),
-        ),
-        LabelIr::Optional => (
-            format!("{path_prefix}borsh_deserialize_opt_{}", suffixes.0),
-            format!("{path_prefix}borsh_serialize_opt_{}", suffixes.1),
-        ),
-        LabelIr::Repeated => (
-            format!("{path_prefix}borsh_deserialize_vec_{}", suffixes.0),
-            format!("{path_prefix}borsh_serialize_vec_{}", suffixes.1),
-        ),
-        LabelIr::FixedArray(n) => (
-            format!(
-                "{path_prefix}borsh_deserialize_fixed_array_{}<{n}, _>",
-                suffixes.0
-            ),
-            format!(
-                "{path_prefix}borsh_serialize_fixed_array_{}<{n}, _>",
-                suffixes.1
-            ),
-        ),
-    };
-
-    let deserialize_lit = LitStr::new(&deserialize_fn_name, Span::call_site());
-    let serialize_lit = LitStr::new(&serialize_fn_name, Span::call_site());
-
-    quote! {
-        #[borsh(
-            deserialize_with = #deserialize_lit,
-            serialize_with = #serialize_lit
-        )]
-    }
-}
-
+///
 /// Returns `#[borsh(deserialize_with = "...", serialize_with = "...")]` for float fields
 /// (f32, f64) that need permissive deserialization allowing NaN/Infinity values.
 /// Standard borsh rejects NaN for portability, but on-chain data may contain them.
+///
 fn float_borsh_attrs(label: &LabelIr, field_type: &FieldTypeIr, path_prefix: &str) -> TokenStream {
     let suffix = match field_type {
         FieldTypeIr::Scalar(ScalarIr::Float) => "f32",
@@ -761,7 +838,7 @@ fn float_borsh_attrs(label: &LabelIr, field_type: &FieldTypeIr, path_prefix: &st
             format!("{path_prefix}borsh_deserialize_{suffix}_permissive"),
             format!("{path_prefix}borsh_serialize_{suffix}_permissive"),
         ),
-        LabelIr::Optional => (
+        LabelIr::Optional(_) => (
             format!("{path_prefix}borsh_deserialize_opt_{suffix}_permissive"),
             format!("{path_prefix}borsh_serialize_opt_{suffix}_permissive"),
         ),
@@ -811,33 +888,40 @@ fn fixed_array_default_borsh_attrs(label: &LabelIr, path_prefix: &str) -> TokenS
     }
 }
 
-/// Return (prost_type, rust_type). When `in_module`, `PublicKey` gets a `super::` prefix.
-fn map_ir_type_to_prost(field_type: &FieldTypeIr, in_module: bool) -> (TokenStream, TokenStream) {
+/// Return the native Rust type for a field, preserving on-chain precision.
+/// Does NOT widen u8→u32 etc. — manual prost impl handles the casting.
+pub(super) fn map_ir_type_to_native(field_type: &FieldTypeIr, in_module: bool) -> TokenStream {
     match field_type {
         FieldTypeIr::Scalar(s) => match s {
-            ScalarIr::Bool => (quote!(bool), quote!(bool)),
-            ScalarIr::U8 | ScalarIr::U16 | ScalarIr::ShortU16 | ScalarIr::Uint32 => {
-                (quote!(uint32), quote!(u32))
+            ScalarIr::Bool => quote!(bool),
+            ScalarIr::U8 => quote!(u8),
+            ScalarIr::U16 | ScalarIr::ShortU16 => quote!(u16),
+            ScalarIr::Uint32 => quote!(u32),
+            ScalarIr::Uint64 => quote!(u64),
+            ScalarIr::I8 => quote!(i8),
+            ScalarIr::I16 => quote!(i16),
+            ScalarIr::Int32 => quote!(i32),
+            ScalarIr::Int64 => quote!(i64),
+            ScalarIr::Float => quote!(f32),
+            ScalarIr::Double => quote!(f64),
+            ScalarIr::U128 => quote!(u128),
+            ScalarIr::I128 => quote!(i128),
+            ScalarIr::String | ScalarIr::SizePrefixedString { .. } => quote!(String),
+            ScalarIr::Bytes | ScalarIr::SizePrefixedBytes { .. } | ScalarIr::FixedBytes(_) => {
+                quote!(Vec<u8>)
             },
-            ScalarIr::Uint64 => (quote!(uint64), quote!(u64)),
-            ScalarIr::I8 | ScalarIr::I16 | ScalarIr::Int32 => (quote!(int32), quote!(i32)),
-            ScalarIr::Int64 => (quote!(int64), quote!(i64)),
-            ScalarIr::Float => (quote!(float), quote!(f32)),
-            ScalarIr::Double => (quote!(double), quote!(f64)),
-            ScalarIr::String => (quote!(string), quote!(String)),
-            ScalarIr::Bytes => (quote!(bytes = "vec"), quote!(Vec<u8>)),
-            ScalarIr::FixedBytes(_) => (quote!(bytes = "vec"), quote!(Vec<u8>)),
             ScalarIr::PublicKey => {
                 if in_module {
-                    (quote!(message), quote!(super::PublicKey))
+                    quote!(super::Pubkey)
                 } else {
-                    (quote!(message), quote!(PublicKey))
+                    quote!(Pubkey)
                 }
             },
         },
         FieldTypeIr::Message(name) => {
             let ident = format_ident!("{}", name);
-            (quote!(message), quote!(#ident))
+
+            quote!(#ident)
         },
     }
 }

@@ -1,0 +1,14 @@
+[package]
+name = "bpf-loader-parser-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+shipstern-bpf-loader-parser = { workspace = true }
+shipstern-core = { workspace = true, features = ["proto"] }
+shipstern-mock = { workspace = true }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+regex = { workspace = true }

@@ -1,0 +1,35 @@
+[package]
+name = "shipstern-bpf-loader-parser"
+description = "Shipstern program parsers for the BPF upgradeable loader program."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "./../../README.md"
+
+[dependencies]
+bincode = { workspace = true }
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+solana-loader-v3-interface = { workspace = true }
+solana-sdk-ids = { workspace = true }
+shipstern-core = { workspace = true }
+shipstern-parser = { workspace = true }
+shipstern-proc-macro = { workspace = true }
+shipstern-proto = { workspace = true, features = [
+  "parser",
+], optional = true }
+thiserror.workspace = true
+
+[features]
+default = ["proto"]
+proto = [
+  "dep:prost",
+  "dep:prost-types",
+  "dep:shipstern-proto",
+  "shipstern-core/proto",
+  "shipstern-proc-macro/proto",
+  "shipstern-proto/parser",
+  "shipstern-parser/proto",
+]

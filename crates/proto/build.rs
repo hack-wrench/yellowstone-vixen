@@ -12,13 +12,18 @@ fn main() {
     #[cfg(feature = "parser")]
     {
         tonic_prost_build::configure()
-            .file_descriptor_set_path(out_dir.join("vixen.parser.token.bin"))
+            .file_descriptor_set_path(out_dir.join("shipstern.parser.token.bin"))
             .compile_protos(&["proto/token.proto"], &["proto"])
             .unwrap();
 
         tonic_prost_build::configure()
-            .file_descriptor_set_path(out_dir.join("vixen.parser.token_extensions.bin"))
+            .file_descriptor_set_path(out_dir.join("shipstern.parser.token_extensions.bin"))
             .compile_protos(&["proto/token_extensions.proto"], &["proto"])
+            .unwrap();
+
+        tonic_prost_build::configure()
+            .file_descriptor_set_path(out_dir.join("shipstern.parser.bpf_loader.bin"))
+            .compile_protos(&["proto/bpf_loader.proto"], &["proto"])
             .unwrap();
 
         // Generate a self-contained schema for token_extensions that bundles

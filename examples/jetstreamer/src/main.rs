@@ -2,24 +2,20 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::Parser as _;
-use tracing::info;
-use yellowstone_vixen::{
-    config::{BufferConfig, VixenConfig},
+use shipstern::{
+    config::{BufferConfig, ShipsternConfig},
     Handler, HandlerResult, Pipeline, Runtime,
 };
-use yellowstone_vixen_core::{instruction::InstructionUpdate, ParserId};
-use yellowstone_vixen_jetstream_source::{JetstreamSource, JetstreamSourceConfig, SlotRangeConfig};
-use yellowstone_vixen_spl_token_parser::{
-    instruction::Instruction, InstructionParser, TokenProgram,
-};
+use shipstern_core::{instruction::InstructionUpdate, ParserId};
+use shipstern_jetstream_source::{JetstreamSource, JetstreamSourceConfig, SlotRangeConfig};
+use shipstern_spl_token_parser::{instruction::Instruction, InstructionParser, TokenProgram};
+use tracing::info;
 
-fn pk(pubkey: &yellowstone_vixen_spl_token_parser::PublicKey) -> String {
-    bs58::encode(&pubkey.value).into_string()
-}
+fn pk(pubkey: &shipstern_spl_token_parser::Pubkey) -> String { pubkey.to_string() }
 
-fn pk_opt(pubkey: &Option<yellowstone_vixen_spl_token_parser::PublicKey>) -> String {
+fn pk_opt(pubkey: &Option<shipstern_spl_token_parser::Pubkey>) -> String {
     match pubkey {
-        Some(p) => bs58::encode(&p.value).into_string(),
+        Some(p) => p.to_string(),
         None => "None".to_string(),
     }
 }
@@ -154,22 +150,44 @@ struct Opts {
     /// Archive URL
     #[arg(long, default_value = "https://api.old-faithful.net")]
     archive_url: String,
+
+    /// Emit a firehose progress stats line every N slots (0 disables)
+    #[arg(long, default_value = "10000")]
+    stats_interval_slots: u64,
+
+    /// Single firehose worker thread with parallel ripget downloads.
+    /// `--threads` then configures ripget range concurrency.
+    #[arg(long)]
+    sequential: bool,
+
+    /// Replay epochs from newest to oldest. Slots within an epoch still
+    /// arrive in ascending order. Implies sequential mode upstream.
+    #[arg(long)]
+    reverse: bool,
+
+    /// Ripget hot/cold window in bytes for sequential mode. Defaults to a
+    /// bounded value when unset; see JetstreamSourceConfig::buffer_window_bytes.
+    #[arg(long)]
+    buffer_window_bytes: Option<u64>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize tracing
+/// Entry point: set env vars while the process is still single-threaded,
+/// then hand off to the async runtime.
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     let opts = Opts::parse();
 
-    // Build slot range config from CLI args
     let range = SlotRangeConfig {
         slot_start: opts.slot_start,
         slot_end: opts.slot_end,
-        epoch: opts.epoch.or(Some(885)), // Default to epoch 885 if nothing specified
+        epoch: if opts.slot_start.is_some() {
+            None
+        } else {
+            opts.epoch.or(Some(885))
+        },
     };
 
     let config = JetstreamSourceConfig {
@@ -179,8 +197,22 @@ async fn main() -> Result<()> {
         network: "mainnet".to_string(),
         compact_index_base_url: "https://files.old-faithful.net".to_string(),
         network_capacity_mb: 100000,
+        sequential: opts.sequential,
+        reverse: opts.reverse,
+        buffer_window_bytes: opts.buffer_window_bytes,
+        stats_interval_slots: opts.stats_interval_slots,
+        possible_leader_skipped_tx: None,
+        shutdown_signal_tx: None,
     };
 
+    // SAFETY: Called from main() before the Tokio runtime is created.
+    // This binary must not spawn any other threads before this point.
+    unsafe { shipstern_jetstream_source::init_process_env(&config) };
+
+    tokio::runtime::Runtime::new()?.block_on(run(config))
+}
+
+async fn run(config: JetstreamSourceConfig) -> Result<()> {
     info!("Starting Jetstream replay with SPL Token parsing");
     info!(archive_url = %config.archive_url, "Configuration");
     info!(
@@ -197,22 +229,22 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to resolve slot range: {}", e))?;
     info!(start_slot, end_slot, "Resolved slot range");
 
-    let vixen_config = VixenConfig {
+    let shipstern_config = ShipsternConfig {
         source: config,
         buffer: BufferConfig::default(),
     };
 
-    info!("Building Vixen runtime with SPL Token instruction parser");
+    info!("Building Shipstern runtime with SPL Token instruction parser");
     let pipeline = Pipeline::new(InstructionParser, [TokenInstructionLogger]);
     info!("Created pipeline with ID: {}", pipeline.id());
 
     let runtime = Runtime::<JetstreamSource>::builder()
         .instruction(pipeline)
-        .build(vixen_config);
+        .build(shipstern_config);
 
     let start_time = Instant::now();
 
-    info!("Starting Vixen runtime...");
+    info!("Starting Shipstern runtime...");
     runtime.try_run_async().await?;
 
     let processing_time = start_time.elapsed().as_secs_f64();

@@ -41,10 +41,10 @@
 | `parsed_messages_before_lifecycle_are_buffered` | Early messages preserved |
 | `double_confirmation_is_idempotent` | Confirming twice is safe |
 
-### Invariant Violation (panic tests)
+### Late Post-Flush Messages
 | Test | Verifies |
 |------|----------|
-| `late_message_for_flushed_slot_panics` | Panics on two-gate violation |
+| `late_message_for_flushed_slot_is_dropped` | Drops stale parsed events after the flush frontier |
 
 ## Fixture File
 
@@ -60,12 +60,12 @@
 ## Running Tests
 
 ```bash
-cargo test -p yellowstone-vixen-block-coordinator
-cargo test -p yellowstone-vixen-block-coordinator -- --nocapture
+cargo test -p shipstern-block-coordinator
+cargo test -p shipstern-block-coordinator -- --nocapture
 ```
 
 ## Custom Fixture Path
 
 ```bash
-FIXTURE_PATH=/path/to/fixture.bin cargo test -p yellowstone-vixen-block-coordinator
+FIXTURE_PATH=/path/to/fixture.bin cargo test -p shipstern-block-coordinator
 ```

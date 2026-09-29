@@ -35,12 +35,12 @@
 //! │           │                                                                 │
 //! │           ▼                                                                 │
 //! │  ┌────────────────────┐  YES   ┌─────────────────────────────────┐          │
-//! │  │ slot in discarded? ├───────►│ DROP (dead/forked/untracked)    │          │
+//! │  │ slot in discarded? ├───────►│ DROP + WARN (non-canonical)     │          │
 //! │  └────────┬───────────┘        │ [discarded_slot_ignores_parsed] │          │
 //! │           │ NO                 └─────────────────────────────────┘          │
 //! │           ▼                                                                 │
 //! │  ┌──────────────────────────────┐YES┌──────────────────────────────────────┐│
-//! │  │ slot <= last_instruction_    ├──►│ ERROR (TwoGateInvariantViolation)    ││
+//! │  │ slot <= last_instruction_    ├──►│ DROP + WARN                          ││
 //! │  │ flushed_slot?                │   │ Instruction event after flush frontier││
 //! │  └────────┬─────────────────────┘   └──────────────────────────────────────┘│
 //! │           │ NO                 └─────────────────────────────────┘          │
@@ -163,8 +163,8 @@
 //! │    ✓ parsed_before_lifecycle_buffered  Early messages preserved             │
 //! │    ✓ double_confirmation_is_idempotent Confirming twice is safe             │
 //! │                                                                             │
-//! │  INVARIANT VIOLATION (panic tests):                                         │
-//! │    ✓ late_message_for_flushed_slot_errors  Detects two-gate bug             │
+//! │  LATE POST-FLUSH MESSAGES:                                                  │
+//! │    ✓ late_message_for_flushed_slot_is_dropped  Drops stale parsed events    │
 //! │                                                                             │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
@@ -197,6 +197,10 @@
 
 use std::time::Duration;
 
+use shipstern_block_coordinator::{
+    AccountCommitAt, AccountSlot, BlockMachineCoordinator, CoordinatorError, CoordinatorInput,
+    CoordinatorMessage, InstructionRecordSortKey, InstructionSlot,
+};
 use solana_hash::Hash;
 use tokio::sync::mpsc;
 use yellowstone_grpc_proto::{
@@ -205,10 +209,6 @@ use yellowstone_grpc_proto::{
         SubscribeUpdateEntry, SubscribeUpdateSlot,
     },
     prelude::{BlockHeight, UnixTimestamp},
-};
-use yellowstone_vixen_block_coordinator::{
-    AccountCommitAt, AccountSlot, BlockMachineCoordinator, CoordinatorError, CoordinatorInput,
-    CoordinatorMessage, InstructionRecordSortKey, InstructionSlot,
 };
 
 // =============================================================================
@@ -792,6 +792,9 @@ async fn untracked_slot_discarded() {
     harness.send_orphan_block_summary(100, 99).await;
     harness.expect_no_flush().await;
 
+    send_record_to_slot(&harness.parsed_tx, 100, "ignored-untracked").await;
+    harness.expect_no_flush().await;
+
     let next = harness.slot(101).parent(100).empty().await;
     next.confirm().await;
 
@@ -914,7 +917,7 @@ async fn gap_in_sequence_blocks_flush() {
 }
 
 #[tokio::test]
-async fn late_message_for_flushed_slot_errors() {
+async fn late_message_for_flushed_slot_is_dropped() {
     let (input_tx, input_rx) = mpsc::channel::<CoordinatorInput>(256);
     let (parsed_tx, parsed_rx) = mpsc::channel(256);
     let (output_tx, mut output_rx) = mpsc::channel(64);
@@ -942,17 +945,28 @@ async fn late_message_for_flushed_slot_errors() {
         .expect("Channel closed");
     assert_eq!(flushed.slot, 100);
 
-    // Send late message - this should return an error
+    // Send late message. Restarting from the slot topic would resume after this
+    // stale slot anyway, so the coordinator drops it without terminating.
     send_record_to_slot(&parsed_tx, 100, "too-late").await;
 
-    // Wait for coordinator task to complete (it should return an error)
-    let result = handle.await.expect("task join");
+    tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(
-        matches!(
-            result,
-            Err(CoordinatorError::TwoGateInvariantViolation { .. })
-        ),
-        "Expected TwoGateInvariantViolation, got: {result:?}"
+        !handle.is_finished(),
+        "Coordinator should keep running after stale parsed events"
+    );
+    assert!(output_rx.try_recv().is_err(), "Unexpected stale flush");
+
+    drop(slot);
+    drop(input_tx);
+    drop(parsed_tx);
+
+    let result = tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("Timed out waiting for coordinator shutdown")
+        .expect("task join");
+    assert!(
+        result.is_ok(),
+        "Expected clean coordinator shutdown, got: {result:?}"
     );
 }
 
@@ -1008,7 +1022,7 @@ async fn account_gate_blocks_flush_until_account_count_received() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
             record: "acct1".to_string(),
         })
         .await
@@ -1017,7 +1031,7 @@ async fn account_gate_blocks_flush_until_account_count_received() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(2, [2; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(2, [2; 32]),
             record: "acct2".to_string(),
         })
         .await
@@ -1054,7 +1068,7 @@ async fn account_only_mode_flushes_without_transaction_parsed_messages() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
             record: "acct1".to_string(),
         })
         .await
@@ -1110,7 +1124,7 @@ async fn account_event_after_confirmed_is_warn_not_error() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
             record: "acct1".to_string(),
         })
         .await
@@ -1139,7 +1153,7 @@ async fn duplicate_confirm_does_not_change_frozen_count() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(1, [1; 32]),
             record: "acct1".to_string(),
         })
         .await
@@ -1148,7 +1162,7 @@ async fn duplicate_confirm_does_not_change_frozen_count() {
         .parsed_tx
         .send(CoordinatorMessage::AccountParsed {
             slot: 100,
-            key: yellowstone_vixen_block_coordinator::AccountRecordSortKey::new(2, [2; 32]),
+            key: shipstern_block_coordinator::AccountRecordSortKey::new(2, [2; 32]),
             record: "acct2".to_string(),
         })
         .await
@@ -1156,4 +1170,109 @@ async fn duplicate_confirm_does_not_change_frozen_count() {
 
     let acct = harness.expect_account_flush(100).await;
     acct.records(&["acct1", "acct2"]);
+}
+
+// =============================================================================
+// DLQ / Incomplete Slot Tests
+// =============================================================================
+
+/// When the block machine DLQ's a slot as Incomplete (out-of-order BlockMeta
+/// for a parent with no entries), the coordinator must discard it so that
+/// subsequent children can still flush.
+#[tokio::test]
+async fn dlq_incomplete_slot_unblocks_subsequent_flush() {
+    let (input_tx, input_rx) = mpsc::channel::<CoordinatorInput>(256);
+    let (parsed_tx, parsed_rx) = mpsc::channel::<CoordinatorMessage<String>>(256);
+    let (output_tx, mut output_rx) = mpsc::channel(64);
+
+    tokio::spawn(BlockMachineCoordinator::run(
+        input_rx,
+        parsed_rx,
+        Some(output_tx),
+        None,
+        AccountCommitAt::Confirmed,
+        true,
+    ));
+
+    // --- Step 1: Parent slot 100 (parent=99) gets lifecycle events but NO entries.
+    // This puts it into the block machine's block_buffer_map without any entries.
+    for status in [
+        SlotStatus::SlotFirstShredReceived,
+        SlotStatus::SlotCreatedBank,
+    ] {
+        input_tx
+            .send(CoordinatorInput::GeyserUpdate(Box::new(make_slot_update(
+                100, 99, status,
+            ))))
+            .await
+            .unwrap();
+    }
+
+    // --- Step 2: Child slot 101 (parent=100) gets FULL lifecycle including entry + BlockMeta.
+    // When child's BlockMeta triggers handle_block_summary, it finds parent 100 still
+    // in block_buffer_map → need_optimistic_freeze. Since parent has no entries,
+    // optimistic freeze fails → DeadletterEvent::Incomplete(100) pushed to DLQ.
+    for status in [
+        SlotStatus::SlotFirstShredReceived,
+        SlotStatus::SlotCreatedBank,
+    ] {
+        input_tx
+            .send(CoordinatorInput::GeyserUpdate(Box::new(make_slot_update(
+                101, 100, status,
+            ))))
+            .await
+            .unwrap();
+    }
+
+    input_tx
+        .send(CoordinatorInput::GeyserUpdate(Box::new(make_entry_update(
+            101, 0, 1,
+        ))))
+        .await
+        .unwrap();
+
+    input_tx
+        .send(CoordinatorInput::GeyserUpdate(Box::new(make_slot_update(
+            101,
+            100,
+            SlotStatus::SlotCompleted,
+        ))))
+        .await
+        .unwrap();
+
+    {
+        let blockhash = Hash::new_unique();
+        input_tx
+            .send(CoordinatorInput::GeyserUpdate(Box::new(
+                make_block_meta_update(101, 100, 1, &blockhash),
+            )))
+            .await
+            .unwrap();
+    }
+
+    // Allow event processing.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    // --- Step 3: Send a TransactionParsed for slot 101 so the tx gate is satisfied.
+    parsed_tx
+        .send(CoordinatorMessage::TransactionParsed { slot: 101 })
+        .await
+        .unwrap();
+
+    // --- Step 4: Confirm slot 101. If the DLQ was drained, parent 100 is in
+    // discarded_slots, so 101's flush check (parent_slot in discarded) passes.
+    input_tx
+        .send(CoordinatorInput::GeyserUpdate(Box::new(make_slot_update(
+            101,
+            100,
+            SlotStatus::SlotConfirmed,
+        ))))
+        .await
+        .unwrap();
+
+    let flushed = tokio::time::timeout(Duration::from_secs(2), output_rx.recv())
+        .await
+        .expect("Timed out — slot 101 never flushed (DLQ not drained?)")
+        .expect("Channel closed");
+    assert_eq!(flushed.slot, 101);
 }

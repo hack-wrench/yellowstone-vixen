@@ -1,5 +1,5 @@
 [package]
-name = "yellowstone-vixen"
+name = "shipstern"
 description = "An all-in-one consumer runtime library for Yellowstone"
 version.workspace = true
 edition.workspace = true
@@ -8,10 +8,10 @@ repository.workspace = true
 authors.workspace = true
 readme = "./../../README.md"
 
-
 [dependencies]
 async-trait = { workspace = true }
 clap = { workspace = true, features = ["env", "derive", "std"] }
+crossbeam-channel = { workspace = true }
 futures-channel = { workspace = true, features = ["sink"] }
 futures-util = { workspace = true, features = ["sink"] }
 opentelemetry = { workspace = true, features = ["metrics"], optional = true }
@@ -19,12 +19,17 @@ prometheus = { workspace = true, features = ["push"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
-topograph = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "sync", "time"] }
 tracing = { workspace = true }
 yellowstone-grpc-client = { workspace = true }
 yellowstone-grpc-proto = { workspace = true }
-yellowstone-vixen-core = { workspace = true }
+shipstern-core = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+yellowstone-grpc-proto = { workspace = true }
 
 [features]
 default = []

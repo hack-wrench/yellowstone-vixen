@@ -1,7 +1,7 @@
-pub use yellowstone_vixen_core::PublicKey;
-use yellowstone_vixen_proc_macro::vixen;
+pub use shipstern_core::Pubkey;
+use shipstern_proc_macro::shipstern;
 
-#[vixen(enumeration)]
+#[shipstern(enumeration)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum AuthorityType {
@@ -11,440 +11,494 @@ pub enum AuthorityType {
     CloseAccount = 3,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferAccounts {
-    pub source: PublicKey,
-    pub destination: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub destination: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferCheckedArgs {
     pub amount: u64,
     pub decimals: u32, // u8 -> uint32 in proto
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferArgs {
     pub amount: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMintAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMintArgs {
     pub decimals: u32, // u8 -> uint32
-    pub mint_authority: PublicKey,
-    pub freeze_authority: Option<PublicKey>,
+    pub mint_authority: Pubkey,
+    pub freeze_authority: Option<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeAccountAccounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
-    pub owner: PublicKey,
+    pub account: Pubkey,
+    pub mint: Pubkey,
+    pub owner: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeAccount2Accounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
+    pub account: Pubkey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeAccount2Args {
-    pub owner: PublicKey,
+    pub owner: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMultisigAccounts {
-    pub multisig: PublicKey,
-    pub signers: Vec<PublicKey>,
+    pub multisig: Pubkey,
+    pub signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeMultisigArgs {
     pub m: u32, // u8 -> uint32
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ApproveAccounts {
-    pub source: PublicKey,
-    pub delegate: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub delegate: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ApproveArgs {
     pub amount: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct RevokeAccounts {
-    pub source: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct SetAuthorityAccounts {
-    pub current_authority: PublicKey,
-    pub account: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub current_authority: Pubkey,
+    pub account: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct SetAuthorityArgs {
     #[hint(enumeration = "AuthorityType")]
     pub authority_type: i32,
-    pub new_authority: Option<PublicKey>,
+    pub new_authority: Option<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct MintToAccounts {
-    pub mint: PublicKey,
-    pub account: PublicKey,
-    pub mint_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub account: Pubkey,
+    pub mint_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct MintToArgs {
     pub amount: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct BurnAccounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub mint: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct BurnArgs {
     pub amount: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct CloseAccountAccounts {
-    pub account: PublicKey,
-    pub destination: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub destination: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct FreezeAccountAccounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
-    pub mint_freeze_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub mint: Pubkey,
+    pub mint_freeze_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ThawAccountAccounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
-    pub mint_freeze_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub mint: Pubkey,
+    pub mint_freeze_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TransferCheckedAccounts {
-    pub source: PublicKey,
-    pub mint: PublicKey,
-    pub destination: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub mint: Pubkey,
+    pub destination: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ApproveCheckedAccounts {
-    pub source: PublicKey,
-    pub mint: PublicKey,
-    pub delegate: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub source: Pubkey,
+    pub mint: Pubkey,
+    pub delegate: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct ApproveCheckedArgs {
     pub amount: u64,
     pub decimals: u32,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct MintToCheckedAccounts {
-    pub mint: PublicKey,
-    pub account: PublicKey,
-    pub mint_authority: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub mint: Pubkey,
+    pub account: Pubkey,
+    pub mint_authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct MintToCheckedArgs {
     pub amount: u64,
     pub decimals: u32,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct BurnCheckedAccounts {
-    pub account: PublicKey,
-    pub mint: PublicKey,
-    pub owner: PublicKey,
-    pub multisig_signers: Vec<PublicKey>,
+    pub account: Pubkey,
+    pub mint: Pubkey,
+    pub owner: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct BurnCheckedArgs {
     pub amount: u64,
     pub decimals: u32,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct SyncNativeAccounts {
-    pub account: PublicKey,
+    pub account: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct GetAccountDataSizeAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct InitializeImmutableOwnerAccounts {
-    pub account: PublicKey,
+    pub account: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct AmountToUiAmountAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct AmountToUiAmountArgs {
     pub amount: u64,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UiAmountToAmountAccounts {
-    pub mint: PublicKey,
+    pub mint: Pubkey,
 }
 
-#[vixen]
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct UiAmountToAmountArgs {
     pub ui_amount: String,
 }
 
-#[vixen]
+#[shipstern]
+#[derive(Clone, PartialEq)]
+pub struct WithdrawExcessLamportsAccounts {
+    pub source: Pubkey,
+    pub destination: Pubkey,
+    pub authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
+}
+
+#[shipstern]
+#[derive(Clone, PartialEq)]
+pub struct UnwrapLamportsAccounts {
+    pub source: Pubkey,
+    pub destination: Pubkey,
+    pub authority: Pubkey,
+    pub multisig_signers: Vec<Pubkey>,
+}
+
+#[shipstern]
+#[derive(Clone, PartialEq)]
+pub struct UnwrapLamportsArgs {
+    pub amount: Option<u64>,
+}
+
+#[shipstern]
+#[derive(Clone, PartialEq)]
+pub struct BatchInstruction {
+    pub number_of_accounts: u32,
+    pub accounts: Vec<Pubkey>,
+    pub data: Vec<u8>,
+    pub instruction: Option<TokenProgram>,
+}
+
+#[shipstern]
+#[derive(Clone, PartialEq)]
+pub struct Batch {
+    pub instructions: Vec<BatchInstruction>,
+    pub remaining_accounts: Vec<Pubkey>,
+}
+
+#[shipstern]
 #[derive(Clone, PartialEq)]
 pub struct TokenProgram {
     #[hint(
         oneof = "instruction::Instruction",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, \
+                23, 24, 25, 26"
     )]
     pub instruction: Option<instruction::Instruction>,
 }
 
 pub mod instruction {
-    use super::vixen;
+    use super::shipstern;
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Transfer {
         pub accounts: super::TransferAccounts,
         pub args: super::TransferArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeMint {
         pub accounts: super::InitializeMintAccounts,
         pub args: super::InitializeMintArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeAccount {
         pub accounts: super::InitializeAccountAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeAccount2 {
         pub accounts: super::InitializeAccount2Accounts,
         pub args: super::InitializeAccount2Args,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeAccount3 {
         pub accounts: super::InitializeAccount2Accounts,
         pub args: super::InitializeAccount2Args,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeMultisig {
         pub accounts: super::InitializeMultisigAccounts,
         pub args: super::InitializeMultisigArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Approve {
         pub accounts: super::ApproveAccounts,
         pub args: super::ApproveArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Revoke {
         pub accounts: super::RevokeAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct SetAuthority {
         pub accounts: super::SetAuthorityAccounts,
         pub args: super::SetAuthorityArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct MintTo {
         pub accounts: super::MintToAccounts,
         pub args: super::MintToArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct Burn {
         pub accounts: super::BurnAccounts,
         pub args: super::BurnArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct CloseAccount {
         pub accounts: super::CloseAccountAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct FreezeAccount {
         pub accounts: super::FreezeAccountAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct ThawAccount {
         pub accounts: super::ThawAccountAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct TransferChecked {
         pub accounts: super::TransferCheckedAccounts,
         pub args: super::TransferCheckedArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct ApproveChecked {
         pub accounts: super::ApproveCheckedAccounts,
         pub args: super::ApproveCheckedArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct MintToChecked {
         pub accounts: super::MintToCheckedAccounts,
         pub args: super::MintToCheckedArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct BurnChecked {
         pub accounts: super::BurnCheckedAccounts,
         pub args: super::BurnCheckedArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct SyncNative {
         pub accounts: super::SyncNativeAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct GetAccountDataSize {
         pub accounts: super::GetAccountDataSizeAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct InitializeImmutableOwner {
         pub accounts: super::InitializeImmutableOwnerAccounts,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct AmountToUiAmount {
         pub accounts: super::AmountToUiAmountAccounts,
         pub args: super::AmountToUiAmountArgs,
     }
 
-    #[vixen]
+    #[shipstern]
     #[derive(Clone, PartialEq)]
     pub struct UiAmountToAmount {
         pub accounts: super::UiAmountToAmountAccounts,
         pub args: super::UiAmountToAmountArgs,
     }
 
-    #[vixen(oneof)]
+    #[shipstern]
+    #[derive(Clone, PartialEq)]
+    pub struct WithdrawExcessLamports {
+        pub accounts: super::WithdrawExcessLamportsAccounts,
+    }
+
+    #[shipstern]
+    #[derive(Clone, PartialEq)]
+    pub struct UnwrapLamports {
+        pub accounts: super::UnwrapLamportsAccounts,
+        pub args: super::UnwrapLamportsArgs,
+    }
+
+    #[shipstern(oneof)]
     #[derive(Clone, PartialEq)]
     pub enum Instruction {
         Transfer(Transfer),
@@ -470,5 +524,8 @@ pub mod instruction {
         InitializeImmutableOwner(InitializeImmutableOwner),
         AmountToUiAmount(AmountToUiAmount),
         UiAmountToAmount(UiAmountToAmount),
+        WithdrawExcessLamports(WithdrawExcessLamports),
+        UnwrapLamports(UnwrapLamports),
+        Batch(super::Batch),
     }
 }

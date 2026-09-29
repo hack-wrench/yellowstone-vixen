@@ -7,11 +7,11 @@ use yellowstone_grpc_proto::{
     prelude::MessageHeader,
     solana::storage::confirmed_block::{
         CompiledInstruction, InnerInstruction, InnerInstructions, Message, Reward, TokenBalance,
-        Transaction, TransactionError, TransactionStatusMeta,
+        Transaction, TransactionConfig, TransactionError, TransactionStatusMeta,
     },
 };
 
-use crate::{KeyBytes, TransactionUpdate};
+use crate::{log_messages::assign_log_messages, Pubkey, TransactionUpdate};
 
 /// Errors that can occur when parsing a transaction update into instructions.
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -95,15 +95,17 @@ pub struct InstructionShared {
     pub accounts: AccountKeys,
     /// The header of the transaction.
     pub message_header: MessageHeader,
+    /// The inline transaction budget config introduced by Transaction V1
+    pub transaction_config: Option<TransactionConfig>,
 }
 
 /// A parsed instruction from a transaction update.
 #[derive(Debug, Clone)]
 pub struct InstructionUpdate {
     /// The program ID of the instruction.
-    pub program: KeyBytes<32>,
+    pub program: Pubkey,
     /// The accounts passed to the instruction.
-    pub accounts: Vec<KeyBytes<32>>,
+    pub accounts: Vec<Pubkey>,
     /// The serialized binary instruction payload.
     pub data: Vec<u8>,
     /// Shared data between all instructions in this transaction.
@@ -112,6 +114,8 @@ pub struct InstructionUpdate {
     pub inner: Vec<InstructionUpdate>,
     /// The path of this instruction within the transaction.
     pub path: Path,
+    /// Range into `shared.log_messages` for this instruction's logs.
+    pub log_range: std::ops::Range<usize>,
 }
 
 /// The keys of the accounts involved in a transaction.
@@ -125,7 +129,7 @@ pub struct AccountKeys {
     pub dynamic_ro: Vec<Vec<u8>>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 /// 0-based indices representing the path to the instruction
 // typically one or two elements long, but can be 3+ levels deep
 // empty path makes no sense, but is allowed for completeness
@@ -218,7 +222,7 @@ impl AccountKeys {
     ///
     /// # Errors
     /// Returns an error if the index is invalid.
-    pub fn get<I: TryInto<usize>>(&self, idx: I) -> Result<KeyBytes<32>, AccountKeyError>
+    pub fn get<I: TryInto<usize>>(&self, idx: I) -> Result<Pubkey, AccountKeyError>
     where I::Error: Into<std::num::TryFromIntError> {
         let idx = idx
             .try_into()
@@ -240,12 +244,75 @@ impl AccountKeys {
 }
 
 impl InstructionUpdate {
-    /// Parse a transaction update into a list of instructions.
+    /// Returns the log messages for this specific instruction.
+    ///
+    /// This is a zero-copy slice into the shared transaction log messages.
+    #[must_use]
+    pub fn log_messages(&self) -> &[String] { &self.shared.log_messages[self.log_range.clone()] }
+
+    /// Returns the log messages emitted *directly* by this instruction's
+    /// program, excluding lines emitted while an inner CPI is on top of the
+    /// invocation stack.
+    ///
+    /// Unlike [`log_messages`](Self::log_messages), which yields every line
+    /// inside this instruction's `invoke`/`success` window (including nested
+    /// CPI logs), this iterator skips any line that occurs while a deeper
+    /// `Program ... invoke [N+1]` is active.
+    ///
+    /// The opening `Program <id> invoke [N]` and closing
+    /// `Program <id> success`/`failed:` lines for this instruction are
+    /// included; the lines between them are filtered to depth-0 only.
+    ///
+    /// Example output for an outer Raydium ix that CPIs to the token program:
+    ///
+    /// ```text,ignore
+    /// Program RAY invoke [1]
+    /// Program log: ray_log: swap-base-in
+    /// Program log: ray_log: swap done
+    /// Program RAY success
+    /// ```
+    ///
+    /// (Token-program lines emitted at depth 2 are skipped.)
+    pub fn direct_log_messages(&self) -> impl Iterator<Item = &str> {
+        use crate::log_messages::{classify_log_line, LogLineKind};
+
+        let lines = self.log_messages();
+        let mut depth: u32 = 0;
+
+        lines.iter().filter_map(move |line| {
+            match classify_log_line(line) {
+                LogLineKind::Invoke => {
+                    depth += 1;
+                    // Only the outermost invoke (this instruction's own) is at
+                    // depth 1 after the increment; deeper invokes are skipped.
+                    (depth == 1).then_some(line.as_str())
+                },
+                LogLineKind::Close => {
+                    let was_outer = depth == 1;
+                    depth = depth.saturating_sub(1);
+                    was_outer.then_some(line.as_str())
+                },
+                LogLineKind::Other => (depth == 1).then_some(line.as_str()),
+            }
+        })
+    }
+
+    /// Build instruction updates from a transaction update.
     ///
     /// # Errors
-    /// Returns an error if the transaction update received is in an unparseable
+    /// Returns an error if the transaction update received is in an unbuildable
     /// form.
+    #[deprecated(note = "use InstructionUpdate::build_from_txn instead")]
     pub fn parse_from_txn(txn: &TransactionUpdate) -> Result<Vec<Self>, ParseError> {
+        Self::build_from_txn(txn)
+    }
+
+    /// Build instruction updates from a transaction update.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction update received is in an unbuildable
+    /// form.
+    pub fn build_from_txn(txn: &TransactionUpdate) -> Result<Vec<Self>, ParseError> {
         let TransactionUpdate { transaction, slot } = txn.clone();
         let SubscribeUpdateTransactionInfo {
             signature,
@@ -285,6 +352,7 @@ impl InstructionUpdate {
             instructions,
             versioned: _,
             address_table_lookups: _,
+            config,
         } = message.ok_or(Missing::TransactionMessage)?;
 
         let shared = Arc::new(InstructionShared {
@@ -308,22 +376,28 @@ impl InstructionUpdate {
                 dynamic_ro: loaded_readonly_addresses,
             },
             message_header: header.ok_or(Missing::TransactionMessageHeader)?,
+            transaction_config: config,
         });
 
         #[allow(clippy::cast_possible_truncation)] // instruction count never exceeds u32::MAX
         let mut outer = instructions
             .into_iter()
             .enumerate()
-            .map(|(idx, i)| Self::parse_one(Arc::clone(&shared), i, Path::new_single(idx as u32)))
+            .map(|(idx, i)| {
+                Self::build_outer_instruction(Arc::clone(&shared), i, Path::new_single(idx as u32))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
-        Self::parse_inner(&shared, inner_instructions, &mut outer)?;
+        Self::attach_inner_instructions(&shared, inner_instructions, &mut outer)?;
+
+        assign_log_messages(&shared.log_messages, &mut outer);
 
         Ok(outer)
     }
 
-    // called once per tx
-    fn parse_inner(
+    // Called once per transaction to reconstruct nested CPI instructions and
+    // attach them to their outer parent.
+    fn attach_inner_instructions(
         shared: &Arc<InstructionShared>,
         inner_instructions: Vec<InnerInstructions>,
         outer: &mut [Self],
@@ -350,7 +424,11 @@ impl InstructionUpdate {
                 .into_iter()
                 .enumerate()
                 .map(|(idx, i)| {
-                    Self::parse_one_inner(Arc::clone(shared), i, paths_at_index[idx].clone())
+                    Self::build_inner_instruction(
+                        Arc::clone(shared),
+                        i,
+                        paths_at_index[idx].clone(),
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -358,7 +436,10 @@ impl InstructionUpdate {
                 while i > 0 {
                     let parent_idx = i - 1;
                     let Some(height) = inner[parent_idx].1 else {
-                        // stack_height missing for old data
+                        // stack_height missing for old data: we can't reconstruct
+                        // nesting for this parent, so leave it flat and step back.
+                        // (Must decrement here, otherwise the loop spins forever.)
+                        i -= 1;
                         continue;
                     };
                     while inner
@@ -386,7 +467,7 @@ impl InstructionUpdate {
     }
 
     #[inline]
-    fn parse_one(
+    fn build_outer_instruction(
         shared: Arc<InstructionShared>,
         ins: CompiledInstruction,
         path: Path,
@@ -396,10 +477,10 @@ impl InstructionUpdate {
             ref accounts,
             data,
         } = ins;
-        Self::parse_from_parts(shared, program_id_index, accounts, data, path)
+        Self::build_instruction(shared, program_id_index, accounts, data, path)
     }
 
-    fn parse_one_inner(
+    fn build_inner_instruction(
         shared: Arc<InstructionShared>,
         ins: InnerInstruction,
         path: Path,
@@ -410,11 +491,11 @@ impl InstructionUpdate {
             data,
             stack_height,
         } = ins;
-        Self::parse_from_parts(shared, program_id_index, accounts, data, path)
+        Self::build_instruction(shared, program_id_index, accounts, data, path)
             .map(|i| (i, stack_height))
     }
 
-    fn parse_from_parts(
+    fn build_instruction(
         shared: Arc<InstructionShared>,
         program_id_index: u32,
         accounts: &[u8],
@@ -431,12 +512,43 @@ impl InstructionUpdate {
             shared,
             inner: vec![],
             path,
+            log_range: 0..0,
         })
     }
 
     /// Iterate over all inner instructions stored in this instruction.
     #[inline]
     pub fn visit_all(&self) -> VisitAll<'_> { VisitAll::new(self) }
+
+    /// Iterate over this instruction and nested CPI instructions with the
+    /// flat instruction index used by Solana's inner-instruction list.
+    ///
+    /// [`InstructionUpdate::path`] preserves the CPI call tree reconstructed
+    /// from `stack_height`, so a grandchild CPI can have a path such as `3.2.1`.
+    /// The returned index for CPI records instead uses the flat execution order
+    /// under the outer instruction. This is the index shape used by Kafka keys
+    /// and `ix_index` headers.
+    pub fn visit_all_with_flat_indices(&self) -> impl Iterator<Item = (&InstructionUpdate, Path)> {
+        let outer_index = self.path.as_slice().first().copied();
+        let mut next_inner_index = 0;
+        let mut visited_outer = false;
+
+        self.visit_all().map(move |instruction| {
+            if !visited_outer {
+                visited_outer = true;
+                return (instruction, instruction.path.clone());
+            }
+
+            let Some(outer_index) = outer_index else {
+                return (instruction, instruction.path.clone());
+            };
+
+            let path = Path::from(vec![outer_index, next_inner_index]);
+            next_inner_index += 1;
+
+            (instruction, path)
+        })
+    }
 }
 
 /// An iterator over all inner instructions stored in an instruction update.
@@ -478,6 +590,32 @@ impl<'a> Iterator for VisitAll<'a> {
     }
 }
 
+///
+/// Derive instruction paths from the flat `stack_heights` array returned by the Solana runtime.
+///
+/// Each inner instruction carries Solana's runtime `stack_height`. Top-level
+/// transaction instructions execute at stack height `1`, so inner CPI
+/// instructions start at `2` (`2` = direct CPI from a top-level instruction,
+/// `3` = CPI called by a CPI, etc.). If you think in CPI nesting depth, that is
+/// `stack_height - 1`.
+/// This function reconstructs the full tree path for every instruction
+/// by tracking a virtual stack of child indices.
+///
+/// ## Example
+///
+/// Given displayed outer instruction `3` (`outer_index = 2` in the
+/// zero-based Solana transaction arrays) and these inner instructions:
+///
+/// ```text
+/// stack_heights: [2, 2, 3, 3, 2]
+///
+/// ix[0]: height=2  ->  raw Path [2, 0]     -> displayed as 3.1
+/// ix[1]: height=2  ->  raw Path [2, 1]     -> displayed as 3.2
+/// ix[2]: height=3  ->  raw Path [2, 1, 0]  -> displayed as 3.2.1
+/// ix[3]: height=3  ->  raw Path [2, 1, 1]  -> displayed as 3.2.2
+/// ix[4]: height=2  ->  raw Path [2, 2]     -> displayed as 3.3
+/// ```
+///
 fn derive_paths_from_stackheights(stack_heights: &[Option<u32>], outer_index: u32) -> Vec<Path> {
     if stack_heights.is_empty() {
         return Vec::new();
@@ -485,50 +623,55 @@ fn derive_paths_from_stackheights(stack_heights: &[Option<u32>], outer_index: u3
 
     let mut paths: Vec<Path> = Vec::with_capacity(stack_heights.len());
 
-    let mut stack: Vec<u32> = Vec::with_capacity(4);
-    stack.push(outer_index);
-    stack.push(0);
-    paths.push(Path(stack.clone()));
-    for (pos, ref sh_this) in stack_heights.iter().enumerate().skip(1) {
-        let (Some(sh_this), Some(sh_parent)) = (sh_this, stack_heights[pos - 1]) else {
-            // catch exceptional cases where stack height is missing
-            // assume same level
-            if let Some(top) = stack.last_mut() {
-                *top += 1;
+    // `path_stack` tracks the current position in the call tree as a list of child indices.
+    // e.g. [3, 1, 0] means: outer instruction 3 → child 1 → grandchild 0.
+    let mut path_stack: Vec<u32> = Vec::with_capacity(4);
+
+    path_stack.push(outer_index);
+    path_stack.push(0);
+    paths.push(Path(path_stack.clone()));
+
+    for (i, ref current_height) in stack_heights.iter().enumerate().skip(1) {
+        let (Some(current_height), Some(prev_height)) = (current_height, stack_heights[i - 1])
+        else {
+            // Stack height missing — assume same level as previous instruction.
+            if let Some(last) = path_stack.last_mut() {
+                *last += 1;
             }
-            paths.push(Path(stack.clone()));
+
+            paths.push(Path(path_stack.clone()));
+
             continue;
         };
-        match sh_this.cmp(&sh_parent) {
+
+        match current_height.cmp(&prev_height) {
             std::cmp::Ordering::Greater => {
-                // calling is always +1 stack height
+                // CPI call: descend one level (stack height always increments by exactly 1).
                 debug_assert_eq!(
-                    *sh_this,
-                    sh_parent + 1,
+                    *current_height,
+                    prev_height + 1,
                     "invalid stack heights: {stack_heights:?}"
                 );
-                // descend in tree to child node
-                stack.push(0);
+
+                path_stack.push(0);
             },
             std::cmp::Ordering::Equal => {
-                // same level
-                // stack is actually never empty here
-                if let Some(top) = stack.last_mut() {
-                    *top += 1;
+                // Sibling: same depth, advance to next child index.
+                if let Some(last) = path_stack.last_mut() {
+                    *last += 1;
                 }
             },
             std::cmp::Ordering::Less => {
-                // returning from calls might skip multiple levels (not only one link above)
-                // ascend in tree to parent node
-                stack.truncate(*sh_this as usize);
-                // stack is actually never empty here
-                if let Some(top) = stack.last_mut() {
-                    *top += 1;
+                // Return from CPI: may skip multiple levels at once (e.g. height 3 → 1).
+                path_stack.truncate(*current_height as usize);
+
+                if let Some(last) = path_stack.last_mut() {
+                    *last += 1;
                 }
             },
         }
 
-        paths.push(Path(stack.clone()));
+        paths.push(Path(path_stack.clone()));
     }
 
     debug_assert_eq!(
@@ -536,11 +679,23 @@ fn derive_paths_from_stackheights(stack_heights: &[Option<u32>], outer_index: u3
         stack_heights.len(),
         "derived paths failed for {stack_heights:?}"
     );
+
     paths
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use yellowstone_grpc_proto::geyser::SubscribeUpdateTransactionInfo;
+
+    use super::{
+        CompiledInstruction, InnerInstruction, InnerInstructions, InstructionShared,
+        InstructionUpdate, Message, MessageHeader, Transaction, TransactionConfig,
+        TransactionStatusMeta,
+    };
+    use crate::TransactionUpdate;
+
     #[test]
     fn test_ix_path_parent() {
         use super::Path;
@@ -574,5 +729,482 @@ mod tests {
         assert!(!p2.is_ancestor_of(&p1));
         assert!(!p1.is_ancestor_of(&p3));
         assert!(!p1.is_parent_of(&p1));
+    }
+
+    #[test]
+    fn derives_nested_paths_from_stack_heights() {
+        use super::derive_paths_from_stackheights;
+
+        let paths = derive_paths_from_stackheights(
+            &[
+                Some(2),
+                Some(2),
+                Some(3),
+                Some(3),
+                Some(3),
+                Some(3),
+                Some(2),
+            ],
+            2,
+        );
+
+        let paths = paths
+            .iter()
+            .map(|path| format!("{path:?}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, [
+            "3.1", "3.2", "3.2.1", "3.2.2", "3.2.3", "3.2.4", "3.3"
+        ]);
+    }
+
+    #[test]
+    fn visit_all_with_flat_indices_keeps_flat_index_separate_from_tree_path() {
+        let instruction = instruction(vec![2], vec![
+            instruction(vec![2, 0], vec![]),
+            instruction(vec![2, 1], vec![
+                instruction(vec![2, 1, 0], vec![]),
+                instruction(vec![2, 1, 1], vec![]),
+                instruction(vec![2, 1, 2], vec![]),
+                instruction(vec![2, 1, 3], vec![]),
+            ]),
+            instruction(vec![2, 2], vec![]),
+        ]);
+
+        let nested_paths = instruction
+            .visit_all()
+            .map(|instruction| format!("{:?}", instruction.path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(nested_paths, [
+            "3", "3.1", "3.2", "3.2.1", "3.2.2", "3.2.3", "3.2.4", "3.3"
+        ]);
+
+        // Public ixIndex mirrors the flat Solana inner-instruction list:
+        // the nested Token CPIs occupy 3.3 through 3.6, so the next direct
+        // CPI under the same outer instruction is 3.7.
+        let flat_indices = instruction
+            .visit_all_with_flat_indices()
+            .map(|(instruction, flat_index)| {
+                (format!("{:?}", instruction.path), format!("{flat_index:?}"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(flat_indices, [
+            ("3".to_owned(), "3".to_owned()),
+            ("3.1".to_owned(), "3.1".to_owned()),
+            ("3.2".to_owned(), "3.2".to_owned()),
+            ("3.2.1".to_owned(), "3.3".to_owned()),
+            ("3.2.2".to_owned(), "3.4".to_owned()),
+            ("3.2.3".to_owned(), "3.5".to_owned()),
+            ("3.2.4".to_owned(), "3.6".to_owned()),
+            ("3.3".to_owned(), "3.7".to_owned()),
+        ]);
+    }
+
+    #[test]
+    fn build_from_txn_preserves_tree_paths_and_flat_indices_mirror_inner_instruction_order() {
+        let instructions =
+            InstructionUpdate::build_from_txn(&transaction_with_nested_inner_instructions())
+                .expect("transaction should build");
+
+        let outer_instruction = &instructions[2];
+        let nested_paths = outer_instruction
+            .visit_all()
+            .map(|instruction| format!("{:?}", instruction.path))
+            .collect::<Vec<_>>();
+
+        assert_eq!(nested_paths, [
+            "3", "3.1", "3.2", "3.2.1", "3.2.2", "3.2.3", "3.2.4", "3.3"
+        ]);
+
+        let flat_indices = outer_instruction
+            .visit_all_with_flat_indices()
+            .map(|(instruction, flat_index)| {
+                (format!("{:?}", instruction.path), format!("{flat_index:?}"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(flat_indices, [
+            ("3".to_owned(), "3".to_owned()),
+            ("3.1".to_owned(), "3.1".to_owned()),
+            ("3.2".to_owned(), "3.2".to_owned()),
+            ("3.2.1".to_owned(), "3.3".to_owned()),
+            ("3.2.2".to_owned(), "3.4".to_owned()),
+            ("3.2.3".to_owned(), "3.5".to_owned()),
+            ("3.2.4".to_owned(), "3.6".to_owned()),
+            ("3.3".to_owned(), "3.7".to_owned()),
+        ]);
+    }
+
+    #[test]
+    fn build_from_txn_terminates_when_inner_stack_heights_missing() {
+        // Regression test: inner instructions whose `stack_height` is `None`
+        // (older Solana data, or sources that don't populate it) must not send
+        // the CPI-nesting reconstruction into an infinite loop. Before the fix,
+        // a missing stack height on a non-last inner instruction (here: all of
+        // them) spun the `while i > 0` loop forever, pinning a worker at 100% CPU
+        // and eventually stalling the whole pipeline.
+        let txn = transaction_with_missing_inner_stack_heights();
+
+        let instructions =
+            InstructionUpdate::build_from_txn(&txn).expect("transaction should build");
+
+        // One outer instruction, and because no stack heights are available the
+        // three inner instructions can't be re-nested, so they stay flat.
+        assert_eq!(instructions.len(), 1);
+        assert_eq!(instructions[0].inner.len(), 3);
+        assert!(instructions[0].inner.iter().all(|i| i.inner.is_empty()));
+    }
+
+    #[test]
+    fn build_from_txn_nests_present_stack_heights_when_one_is_missing() {
+        use super::Pubkey;
+
+        // Companion to the all-`None` case above: with a mix of present and
+        // missing `stack_height`s the reconstruction must still terminate, nest
+        // the instructions whose heights are known, and leave the height-less
+        // one flat. Heights here are [Some(2), Some(3), None]: the depth-3
+        // instruction is a child of the depth-2 one, and the instruction with no
+        // height stays a sibling at the top of the inner list.
+        let txn = transaction_with_mixed_inner_stack_heights();
+
+        let instructions =
+            InstructionUpdate::build_from_txn(&txn).expect("transaction should build");
+
+        assert_eq!(instructions.len(), 1);
+
+        let inner = &instructions[0].inner;
+        assert_eq!(inner.len(), 2);
+
+        let depth_two: Pubkey = [3u8; 32].into();
+        let depth_three: Pubkey = [4u8; 32].into();
+        let no_height: Pubkey = [5u8; 32].into();
+
+        // The depth-3 instruction is nested under the depth-2 one.
+        assert_eq!(inner[0].program, depth_two);
+        assert_eq!(inner[0].inner.len(), 1);
+        assert_eq!(inner[0].inner[0].program, depth_three);
+
+        // The height-less instruction can't be placed, so it stays flat.
+        assert_eq!(inner[1].program, no_height);
+        assert!(inner[1].inner.is_empty());
+    }
+
+    fn transaction_with_missing_inner_stack_heights() -> TransactionUpdate {
+        TransactionUpdate {
+            slot: 1,
+            transaction: Some(SubscribeUpdateTransactionInfo {
+                signature: vec![9; 64],
+                is_vote: false,
+                transaction: Some(Transaction {
+                    signatures: vec![vec![9; 64]],
+                    message: Some(Message {
+                        header: Some(MessageHeader {
+                            num_required_signatures: 1,
+                            num_readonly_signed_accounts: 0,
+                            num_readonly_unsigned_accounts: 0,
+                        }),
+                        account_keys: (0..8).map(|byte| vec![byte; 32]).collect(),
+                        recent_blockhash: vec![7; 32],
+                        instructions: vec![compiled_instruction(0)],
+                        versioned: false,
+                        address_table_lookups: vec![],
+                        config: None,
+                    }),
+                }),
+                meta: Some(TransactionStatusMeta {
+                    err: None,
+                    fee: 0,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: vec![InnerInstructions {
+                        index: 0,
+                        instructions: vec![
+                            inner_instruction_opt(3, None),
+                            inner_instruction_opt(4, None),
+                            inner_instruction_opt(5, None),
+                        ],
+                    }],
+                    inner_instructions_none: false,
+                    log_messages: vec![],
+                    log_messages_none: false,
+                    pre_token_balances: vec![],
+                    post_token_balances: vec![],
+                    rewards: vec![],
+                    loaded_writable_addresses: vec![],
+                    loaded_readonly_addresses: vec![],
+                    return_data: None,
+                    return_data_none: true,
+                    compute_units_consumed: None,
+                    cost_units: None,
+                }),
+                index: 0,
+            }),
+        }
+    }
+
+    fn transaction_with_mixed_inner_stack_heights() -> TransactionUpdate {
+        TransactionUpdate {
+            slot: 1,
+            transaction: Some(SubscribeUpdateTransactionInfo {
+                signature: vec![9; 64],
+                is_vote: false,
+                transaction: Some(Transaction {
+                    signatures: vec![vec![9; 64]],
+                    message: Some(Message {
+                        header: Some(MessageHeader {
+                            num_required_signatures: 1,
+                            num_readonly_signed_accounts: 0,
+                            num_readonly_unsigned_accounts: 0,
+                        }),
+                        account_keys: (0..8).map(|byte| vec![byte; 32]).collect(),
+                        recent_blockhash: vec![7; 32],
+                        instructions: vec![compiled_instruction(0)],
+                        versioned: false,
+                        address_table_lookups: vec![],
+                        config: None,
+                    }),
+                }),
+                meta: Some(TransactionStatusMeta {
+                    err: None,
+                    fee: 0,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: vec![InnerInstructions {
+                        index: 0,
+                        instructions: vec![
+                            inner_instruction_opt(3, Some(2)),
+                            inner_instruction_opt(4, Some(3)),
+                            inner_instruction_opt(5, None),
+                        ],
+                    }],
+                    inner_instructions_none: false,
+                    log_messages: vec![],
+                    log_messages_none: false,
+                    pre_token_balances: vec![],
+                    post_token_balances: vec![],
+                    rewards: vec![],
+                    loaded_writable_addresses: vec![],
+                    loaded_readonly_addresses: vec![],
+                    return_data: None,
+                    return_data_none: true,
+                    compute_units_consumed: None,
+                    cost_units: None,
+                }),
+                index: 0,
+            }),
+        }
+    }
+
+    fn inner_instruction_opt(program_id_index: u32, stack_height: Option<u32>) -> InnerInstruction {
+        InnerInstruction {
+            program_id_index,
+            accounts: vec![],
+            data: vec![],
+            stack_height,
+        }
+    }
+
+    fn instruction(path: Vec<u32>, inner: Vec<InstructionUpdate>) -> InstructionUpdate {
+        use super::{Path, Pubkey};
+
+        InstructionUpdate {
+            program: Pubkey::default(),
+            accounts: Vec::new(),
+            data: Vec::new(),
+            shared: Arc::new(InstructionShared::default()),
+            inner,
+            path: Path::from(path),
+            log_range: 0..0,
+        }
+    }
+
+    fn transaction_with_nested_inner_instructions() -> TransactionUpdate {
+        TransactionUpdate {
+            slot: 1,
+            transaction: Some(SubscribeUpdateTransactionInfo {
+                signature: vec![9; 64],
+                is_vote: false,
+                transaction: Some(Transaction {
+                    signatures: vec![vec![9; 64]],
+                    message: Some(Message {
+                        header: Some(MessageHeader {
+                            num_required_signatures: 1,
+                            num_readonly_signed_accounts: 0,
+                            num_readonly_unsigned_accounts: 0,
+                        }),
+                        account_keys: (0..8).map(|byte| vec![byte; 32]).collect(),
+                        recent_blockhash: vec![7; 32],
+                        instructions: vec![
+                            compiled_instruction(0),
+                            compiled_instruction(1),
+                            compiled_instruction(2),
+                        ],
+                        versioned: false,
+                        address_table_lookups: vec![],
+                        config: None,
+                    }),
+                }),
+                meta: Some(TransactionStatusMeta {
+                    err: None,
+                    fee: 0,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: vec![InnerInstructions {
+                        index: 2,
+                        instructions: vec![
+                            inner_instruction(3, 2),
+                            inner_instruction(4, 2),
+                            inner_instruction(5, 3),
+                            inner_instruction(6, 3),
+                            inner_instruction(3, 3),
+                            inner_instruction(4, 3),
+                            inner_instruction(5, 2),
+                        ],
+                    }],
+                    inner_instructions_none: false,
+                    log_messages: vec![],
+                    log_messages_none: false,
+                    pre_token_balances: vec![],
+                    post_token_balances: vec![],
+                    rewards: vec![],
+                    loaded_writable_addresses: vec![],
+                    loaded_readonly_addresses: vec![],
+                    return_data: None,
+                    return_data_none: true,
+                    compute_units_consumed: None,
+                    cost_units: None,
+                }),
+                index: 0,
+            }),
+        }
+    }
+
+    fn compiled_instruction(program_id_index: u32) -> CompiledInstruction {
+        CompiledInstruction {
+            program_id_index,
+            accounts: vec![],
+            data: vec![],
+        }
+    }
+
+    fn inner_instruction(program_id_index: u32, stack_height: u32) -> InnerInstruction {
+        InnerInstruction {
+            program_id_index,
+            accounts: vec![],
+            data: vec![],
+            stack_height: Some(stack_height),
+        }
+    }
+
+    #[test]
+    fn v1_transaction_config_is_exposed_on_shared_tx_ctx() {
+        let txn = transaction_v1_with_inline_budget();
+
+        let instructions =
+            InstructionUpdate::build_from_txn(&txn).expect("v1 transaction should build");
+
+        assert_eq!(instructions.len(), 1);
+        let config = instructions[0]
+            .shared
+            .transaction_config
+            .as_ref()
+            .expect("v1 transaction_config should be populated");
+        assert_eq!(config.priority_fee, Some(5_000));
+        assert_eq!(config.compute_unit_limit, Some(200_000));
+        assert_eq!(config.loaded_accounts_data_size_limit, Some(65_536));
+        assert_eq!(config.heap_size, Some(262_144));
+    }
+
+    #[test]
+    fn legacy_transaction_has_no_inline_budget() {
+        let txn = transaction_with_missing_inner_stack_heights();
+
+        let instructions =
+            InstructionUpdate::build_from_txn(&txn).expect("transaction should build");
+
+        assert!(instructions[0].shared.transaction_config.is_none());
+    }
+
+    /// A V1 message that sets no budget fields still arrives with `config`
+    /// present, and that presence is what marks it as V1. Parsers have to see
+    /// `Some(..)` here, not `None`, or an empty-config V1 transaction becomes
+    /// indistinguishable from a V0 one by the time it reaches them.
+    #[test]
+    fn v1_empty_inline_budget_still_reaches_parsers_as_present() {
+        let mut txn = transaction_v1_with_inline_budget();
+        txn.transaction
+            .as_mut()
+            .and_then(|info| info.transaction.as_mut())
+            .and_then(|tx| tx.message.as_mut())
+            .expect("v1 message")
+            .config = Some(TransactionConfig::default());
+
+        let instructions =
+            InstructionUpdate::build_from_txn(&txn).expect("v1 transaction should build");
+
+        let config = instructions[0]
+            .shared
+            .transaction_config
+            .as_ref()
+            .expect("an empty V1 config must survive as Some(..)");
+
+        assert_eq!(config.priority_fee, None);
+        assert_eq!(config.compute_unit_limit, None);
+        assert_eq!(config.loaded_accounts_data_size_limit, None);
+        assert_eq!(config.heap_size, None);
+    }
+
+    fn transaction_v1_with_inline_budget() -> TransactionUpdate {
+        TransactionUpdate {
+            slot: 1,
+            transaction: Some(SubscribeUpdateTransactionInfo {
+                signature: vec![9; 64],
+                is_vote: false,
+                transaction: Some(Transaction {
+                    signatures: vec![vec![9; 64]],
+                    message: Some(Message {
+                        header: Some(MessageHeader {
+                            num_required_signatures: 1,
+                            num_readonly_signed_accounts: 0,
+                            num_readonly_unsigned_accounts: 0,
+                        }),
+                        // V1 inlines every address, so there are no ATL entries.
+                        account_keys: (0..8).map(|byte| vec![byte; 32]).collect(),
+                        recent_blockhash: vec![7; 32],
+                        instructions: vec![compiled_instruction(0)],
+                        versioned: true,
+                        address_table_lookups: vec![],
+                        config: Some(TransactionConfig {
+                            priority_fee: Some(5_000),
+                            compute_unit_limit: Some(200_000),
+                            loaded_accounts_data_size_limit: Some(65_536),
+                            heap_size: Some(262_144),
+                        }),
+                    }),
+                }),
+                meta: Some(TransactionStatusMeta {
+                    err: None,
+                    fee: 0,
+                    pre_balances: vec![],
+                    post_balances: vec![],
+                    inner_instructions: vec![],
+                    inner_instructions_none: false,
+                    log_messages: vec![],
+                    log_messages_none: false,
+                    pre_token_balances: vec![],
+                    post_token_balances: vec![],
+                    rewards: vec![],
+                    loaded_writable_addresses: vec![],
+                    loaded_readonly_addresses: vec![],
+                    return_data: None,
+                    return_data_none: true,
+                    compute_units_consumed: None,
+                    cost_units: None,
+                }),
+                index: 0,
+            }),
+        }
     }
 }
