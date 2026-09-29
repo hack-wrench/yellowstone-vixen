@@ -879,7 +879,7 @@ pub fn instruction_parser(
 
                 fn prefilter(&self) -> Prefilter {
                     Prefilter::builder()
-                        .transaction_accounts([PROGRAM_ID])
+                        .transaction_accounts_include([PROGRAM_ID])
                         .build()
                         .unwrap()
                 }
@@ -959,7 +959,7 @@ pub fn instruction_parser(
 
                 fn prefilter(&self) -> Prefilter {
                     Prefilter::builder()
-                        .transaction_accounts([PROGRAM_ID])
+                        .transaction_accounts_include([PROGRAM_ID])
                         .build()
                         .unwrap()
                 }
@@ -1091,7 +1091,7 @@ pub fn instruction_parser(
 
             fn prefilter(&self) -> Prefilter {
                 Prefilter::builder()
-                    .transaction_accounts([PROGRAM_ID])
+                    .transaction_accounts_include([PROGRAM_ID])
                     .build()
                     .unwrap()
             }
