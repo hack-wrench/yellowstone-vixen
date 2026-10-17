@@ -1,6 +1,6 @@
 # shipstern-proc-macro
 
-This crate provides a procedural macro for generating Shipstern parser modules from [Codama JSON IDL](https://github.com/codama-idl/codama).
+This crate provides a procedural macro for generating Shipstern parser modules from an Anchor IDL or a [Codama JSON IDL](https://github.com/codama-idl/codama).
 
 ## Usage
 
@@ -9,9 +9,9 @@ Add this crate to your `Cargo.toml` (usually as a `proc-macro` dependency):
 ```toml
 [dependencies]
 borsh = { version = "^1.0.0", features = ["derive"] }
-shipstern-core = { version = "0.11.0" }
-shipstern-parser = { version = "0.11.0" }
-shipstern-proc-macro = { version = "0.11.0" }
+shipstern-core = { version = "0.12.0" }
+shipstern-parser = { version = "0.12.0" }
+shipstern-proc-macro = { version = "0.12.0" }
 ```
 
 `shipstern-core` is required: the generated code imports it directly.
@@ -21,19 +21,21 @@ Then, in your code:
 ```rust
 use shipstern_proc_macro::include_shipstern_parser;
 
-// Provide the path (relative to your crate root) to your Codama JSON IDL file.
+// Provide the path (relative to your crate root) to your Anchor or Codama JSON IDL file.
 include_shipstern_parser!("path/to/idl.json");
 ```
 
-This macro will generate Rust modules containing type-safe account and instruction parsers for the specified Solana program. The input is a **Codama** JSON IDL, not a raw Anchor IDL. Output from Codama's own converter loads as it is, since `codama-nodes` defaults the collections its serializer omits. See [the Codama parser guide](../../docs/codama-parser-generation.md).
+The macro generates type-safe account and instruction parsers from an Anchor or Codama JSON IDL. A legacy Anchor IDL needs the program id in `metadata.address`. See [the Anchor IDL guide](../../docs/anchor-idl-parser.md) and [the parser guide](../../docs/codama-parser-generation.md).
 
 ## Events and self-CPI events
 
 Event parsing is gated behind the `program-events` feature. Without it the macro emits no event types, whatever the IDL declares:
 
 ```toml
-shipstern-proc-macro = { version = "0.11.0", features = ["program-events"] }
+shipstern-proc-macro = { version = "0.12.0", features = ["program-events"] }
 ```
+
+A payload that another type links to is still emitted as an ordinary type.
 
 Enabling it changes `InstructionParser::Output` from `Instructions` to `ProgramEventOutput`, which carries the decoded instruction alongside any events found on inner instructions. Because that is a public type, the feature propagates through Cargo's feature unification to every crate sharing the dependency.
 

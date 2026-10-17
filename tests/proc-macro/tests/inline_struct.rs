@@ -1,8 +1,5 @@
-// Regression test for inline Codama structs.
-//
-// Pinocchio-style fixed strings can be represented as an inline struct such
-// as `[u8 length][N-byte UTF-8 buffer]`. The proc macro must materialize these
-// structs as protobuf messages, including when they are wrapped in Option.
+// Regression: inline Codama structs (e.g. Pinocchio fixed strings) must become
+// protobuf messages, including inside an Option.
 
 use shipstern_proc_macro::include_shipstern_parser;
 use shipstern_test_utils::check_protobuf_format;
@@ -171,4 +168,29 @@ fn bare_tuple_deserializes_exact_borsh_wire() {
     let reencoded = borsh::to_vec(&expected).unwrap();
 
     assert_eq!((decoded, reencoded), (expected, encoded));
+}
+
+/// SPL Token keeps the old key when it sets a `COption` to `None`, so the bytes
+/// after a `None` tag must not have to be zero.
+#[test]
+fn fixed_none_skips_leftover_padding() {
+    use borsh::BorshDeserialize;
+
+    let wire = |padding: [u8; 6]| {
+        [
+            &[0u8][..],
+            &[0u8; 25][..],
+            &[0u8][..],
+            &padding[..],
+            &[1, b'a', b'a', b'a', 2, b'b', b'b', b'b'][..],
+            &[7, 1, 8, 0, 0, 0, 0, 42][..],
+        ]
+        .concat()
+    };
+
+    let clean = inline_struct::instruction::SetMetadataArgs::try_from_slice(&wire([0; 6])).unwrap();
+    let leftover = inline_struct::instruction::SetMetadataArgs::try_from_slice(&wire([9; 6]))
+        .expect("None with leftover bytes should decode");
+
+    assert_eq!(leftover, clean);
 }

@@ -81,10 +81,10 @@ fn main() {
     let config = std::fs::read_to_string(config).expect("Error reading config file");
     let config = toml::from_str(&config).expect("Error parsing config");
 
-    shipstern::Runtime::<YellowstoneGrpcSource>::builder()
+    shipstern::Runtime::builder()
         .account(Pipeline::new(AccountParser, [Logger]))
         .instruction(Pipeline::new(InstructionParser, [Logger]))
-        .build(config)
+        .build::<YellowstoneGrpcSource>(config)
         .run();
 }
 ```
@@ -119,16 +119,16 @@ rather than a program's accounts and instructions:
 
 ### Codegen Macro
 
-The `shipstern-proc-macro` crate provides the `include_shipstern_parser!` procedural macro, which generates a Shipstern parser from a Codama JSON IDL file.
+The `shipstern-proc-macro` crate provides the `include_shipstern_parser!` procedural macro, which generates a Shipstern parser from an Anchor IDL or a Codama JSON IDL.
 
 To use it, add the following dependencies to your `Cargo.toml`:
 
 ```toml
 [dependencies]
 borsh = { version = "^1.0.0", features = ["derive"] }
-shipstern-core = { version = "0.11.0" }
-shipstern-parser = { version = "0.11.0" }
-shipstern-proc-macro = { version = "0.11.0" }
+shipstern-core = { version = "0.12.0" }
+shipstern-parser = { version = "0.12.0" }
+shipstern-proc-macro = { version = "0.12.0" }
 ```
 
 The generated code imports `shipstern_core` and derives `BorshDeserialize` / `BorshSerialize`, so both `shipstern-core` and the Borsh `derive` feature are required.
@@ -136,12 +136,12 @@ The generated code imports `shipstern_core` and derives `BorshDeserialize` / `Bo
 To parse events, including self-CPI events, enable the `program-events` feature. Note that it also changes `InstructionParser::Output` from `Instructions` to `ProgramEventOutput`:
 
 ```toml
-shipstern-proc-macro = { version = "0.11.0", features = ["program-events"] }
+shipstern-proc-macro = { version = "0.12.0", features = ["program-events"] }
 ```
 
-The macro reads a **Codama** JSON IDL, not a raw Anchor IDL. Output from Codama's own converter loads as it is, since `codama-nodes` defaults the collections its serializer omits. See [Generate a Shipstern Parser from a Codama IDL](./docs/codama-parser-generation.md).
+The macro converts an Anchor IDL at compile time. A legacy Anchor IDL needs the program id in `metadata.address`. Codama JSON also works. See [Parse an Anchor Program Without the Codama CLI](./docs/anchor-idl-parser.md) and [Generate a Shipstern Parser from an Anchor or Codama IDL](./docs/codama-parser-generation.md).
 
-Then, import and invoke the macro in your code. Specify the path to your Codama JSON IDL file relative to your crate root:
+Then, import and invoke the macro in your code. Specify the path to your IDL file relative to your crate root:
 
 ```rust
 use shipstern_proc_macro::include_shipstern_parser;
@@ -229,7 +229,8 @@ A bare `cargo test` does not cover everything CI runs. See [Running Tests](./CON
 - [**Mock Testing for Parsers**](./crates/mock/README.md): Load and replay devnet accounts or transactions offline.
 - [**Usage Examples**](./examples/): A variety of example projects that demonstrate how to use the features.
 - [**Example Shipstern Configuration**](./Shipstern.example.toml): Starter TOML file for pipeline configuration.
-- [**Generate Parsers from IDL**](./docs/codama-parser-generation.md): Generate a Shipstern parser from a Codama IDL with the `include_shipstern_parser!` macro, including how to declare self-CPI event envelopes in Codama.
+- [**Generate Parsers from IDL**](./docs/codama-parser-generation.md): Generate a Shipstern parser from an Anchor or Codama IDL with the `include_shipstern_parser!` macro, including how to declare self-CPI event envelopes in Codama.
+- [**Parse an Anchor Program**](./docs/anchor-idl-parser.md): Point the macro at an Anchor IDL, and fix the compile errors a bad one produces.
 
 ## Maintainers
 

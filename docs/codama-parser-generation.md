@@ -1,17 +1,24 @@
-# Generate a Shipstern Parser from a Codama IDL
+# Generate a Shipstern Parser from an Anchor or Codama IDL
 
-Shipstern generates a parser from a [Codama](https://github.com/codama-idl/codama) IDL at
-compile time, through the `include_shipstern_parser!` proc macro. Nothing is written to
-disk and no build script is involved.
+Shipstern generates a parser from an Anchor IDL or a [Codama](https://github.com/codama-idl/codama)
+IDL at compile time, through the `include_shipstern_parser!` proc macro. Nothing is written
+to disk and no build script is involved.
 
 ```
-Codama JSON ──> include_shipstern_parser! ──> generated parser
-                    (compile time)       (accounts, instructions, events)
+Anchor IDL ──────────────┐
+                         ├──> include_shipstern_parser! ──> generated parser
+Codama JSON ─────────────┘       (compile time)        (accounts, instructions, events)
 ```
 
 ## Quick start
 
-**1. Convert your IDL to Codama JSON.** The macro reads Codama nodes, not a raw Anchor IDL.
+**1. Point the macro at your IDL.** An Anchor IDL with `metadata.spec` `"0.1.0"` (Anchor
+0.30+) works as it is. See [the Anchor IDL guide](anchor-idl-parser.md).
+
+An older Anchor IDL, with no `metadata.spec`, is upgraded in-process. It needs the
+program id in `metadata.address` and works only for Anchor programs; see
+[Older Anchor IDLs](anchor-idl-parser.md#older-anchor-idls). To use Codama JSON instead,
+for example for a Shank IDL, convert the IDL and pass that file:
 
 ```bash
 npx -p codama -p @codama/nodes-from-anchor codama convert idl.json codama.json
@@ -29,11 +36,15 @@ That output loads as it is. Codama's JavaScript omits empty and default-valued
 collections when it serializes, and `codama-nodes` (pinned to `=0.13.2`) defaults
 them on the way back in, so there is nothing to add by hand.
 
+Codama JSON skips the checks the Anchor path runs, such as ambiguous discriminators and
+colliding names, so prefer passing a spec `0.1.0` Anchor IDL when you have one. The
+checks are listed in [the Anchor IDL guide](anchor-idl-parser.md#4-fix-compile-errors).
+
 One constraint to know about: if `programNode.origin` is present it has to be
 `"anchor"` or `"shank"`, which is the closed set Codama models. Any other value is
 rejected when the IDL loads. Leaving the field out is fine.
 
-If your IDL is already in complete Codama form, skip this step. `tests/idls/*.json`
+If your IDL is already in complete Codama form, pass it directly. `tests/idls/*.json`
 in this repository are all in that shape and make a useful reference.
 
 **2. Add the dependencies.**
@@ -41,9 +52,9 @@ in this repository are all in that shape and make a useful reference.
 ```toml
 [dependencies]
 borsh = { version = "^1.0.0", features = ["derive"] }
-shipstern-core = { version = "0.11.0" }
-shipstern-parser = { version = "0.11.0" }
-shipstern-proc-macro = { version = "0.11.0" }
+shipstern-core = { version = "0.12.0" }
+shipstern-parser = { version = "0.12.0" }
+shipstern-proc-macro = { version = "0.12.0" }
 ```
 
 `shipstern-core` and the Borsh `derive` feature are both required: the generated code
@@ -52,7 +63,7 @@ imports `shipstern_core` and derives `BorshDeserialize` / `BorshSerialize` on ev
 To parse events, including self-CPI events, add the `program-events` feature:
 
 ```toml
-shipstern-proc-macro = { version = "0.11.0", features = ["program-events"] }
+shipstern-proc-macro = { version = "0.12.0", features = ["program-events"] }
 ```
 
 **3. Invoke the macro.** The path is resolved relative to your crate root
@@ -61,7 +72,7 @@ shipstern-proc-macro = { version = "0.11.0", features = ["program-events"] }
 ```rust
 use shipstern_proc_macro::include_shipstern_parser;
 
-include_shipstern_parser!("path/to/codama.json");
+include_shipstern_parser!("path/to/idl.json");
 ```
 
 **4. Use the generated module.** It is named after the program, in snake_case, and
@@ -83,10 +94,10 @@ changing it will not affect the generated parser.
 | `program.publicKey` | `PROGRAM_ID` |
 | `program.instructions[].discriminators` | the instruction dispatch key |
 | `program.instructions[].arguments` | the `*Args` struct |
-| `program.instructions[].accounts` | the `*Accounts` struct |
+| `program.instructions[].accounts` | the `*Accounts` struct; a required account's `publicKeyValueNode` `defaultValue` is used when the instruction leaves that account off |
 | `program.accounts[]` | account types and `AccountParser` |
 | `program.definedTypes[]` | shared types, referenced through `definedTypeLinkNode` |
-| `events[]` | event types, **only** with the `program-events` feature |
+| `events[]` | event types, **only** with the `program-events` feature; a payload another type links to is emitted as a defined type |
 
 Ignored: `pdas` and `docs` are not read at all. `errors` is only normalised on load, where a
 string `"code": "6000"` is coerced to a number; it is never rendered into the parser.
@@ -115,7 +126,8 @@ the discriminator and the account count, supply a `CustomInstructionParser`; see
 ## The `program-events` feature
 
 Event parsing is feature-gated. Without `program-events`, the macro emits no event types
-and no self-CPI handling at all, however the IDL declares its events.
+and no self-CPI handling at all, however the IDL declares its events. A payload that another
+type links to is still emitted as an ordinary type.
 
 Enabling it also **changes the parser's output type**: `InstructionParser::Output` becomes
 `ProgramEventOutput`, which carries the decoded instruction alongside any events found on

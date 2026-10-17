@@ -6,6 +6,7 @@ use codama_nodes::{EventNode, RootNode};
 pub enum IdlError {
     ReadFile(std::io::Error),
     ParseFile(serde_json::Error),
+    ConvertAnchor(shipstern_codama_from_anchor::Error),
 }
 
 impl std::fmt::Display for IdlError {
@@ -13,22 +14,61 @@ impl std::fmt::Display for IdlError {
         match self {
             IdlError::ReadFile(e) => write!(f, "Failed to read file: {}", e),
             IdlError::ParseFile(e) => write!(f, "Failed to parse JSON: {}", e),
+            IdlError::ConvertAnchor(
+                e @ shipstern_codama_from_anchor::Error::UnsupportedSpec { .. },
+            ) => {
+                write!(
+                    f,
+                    "{e}. The file has no top-level `kind` and no `program` object, so it was \
+                     read as an Anchor IDL. Codama JSON needs a top-level `program` object; \
+                     convert any other Anchor IDL with `npx -p codama -p \
+                     @codama/nodes-from-anchor codama convert` and pass the Codama JSON instead"
+                )
+            },
+            IdlError::ConvertAnchor(e @ shipstern_codama_from_anchor::Error::NotAnchor(_)) => {
+                write!(
+                    f,
+                    "{e}. Convert it with `npx -p codama -p @codama/nodes-from-anchor codama \
+                     convert`, add each account's `discriminators` (the output has none), and \
+                     pass the Codama JSON instead; for a Steel IDL, remove `program.origin` from \
+                     it first"
+                )
+            },
+            IdlError::ConvertAnchor(e @ shipstern_codama_from_anchor::Error::MissingAddress) => {
+                write!(
+                    f,
+                    "{e}. Add the program id there if this is an Anchor program. The upgrade \
+                     gives Anchor's sha256 discriminators, so a native program needs Codama JSON \
+                     that carries its real instruction tags"
+                )
+            },
+            IdlError::ConvertAnchor(e) => write!(f, "Failed to convert Anchor IDL: {}", e),
         }
     }
 }
 
-/// Load a codama IDL file, returning the root node and any events.
-pub fn load_codama_idl<P: AsRef<Path>>(path: P) -> Result<(RootNode, Vec<EventNode>), IdlError> {
+/// Load Codama JSON or an Anchor IDL, returning the root node and its events.
+/// Only Codama JSON has a top-level `kind` or `program` object.
+pub fn load_idl<P: AsRef<Path>>(path: P) -> Result<(RootNode, Vec<EventNode>), IdlError> {
     let data = fs::read_to_string(&path).map_err(IdlError::ReadFile)?;
 
     let mut value: serde_json::Value = serde_json::from_str(&data).map_err(IdlError::ParseFile)?;
 
-    // Some codama generators emit error codes as strings ("6000") instead of
-    // integers (6000). Coerce them before deserialization so `ErrorNode.code`
-    // (which expects `usize`) doesn't fail.
-    fix_string_error_codes(&mut value);
+    let is_codama = value.get("kind").is_some()
+        || value
+            .get("program")
+            .is_some_and(serde_json::Value::is_object);
 
-    let root = serde_json::from_value::<RootNode>(value).map_err(IdlError::ParseFile)?;
+    let root = if is_codama {
+        // Some generators write error codes as strings ("6000"), which `ErrorNode.code` rejects.
+        fix_string_error_codes(&mut value);
+
+        serde_json::from_value::<RootNode>(value).map_err(IdlError::ParseFile)?
+    } else {
+        shipstern_codama_from_anchor::root_node_from_anchor(value)
+            .map_err(IdlError::ConvertAnchor)?
+    };
+
     let events = root.program.events.clone();
 
     Ok((root, events))
@@ -126,14 +166,9 @@ fn constant_discriminator_bytes(
 }
 
 ///
-/// Infer the CPI event envelope declared by a single event, if any.
-///
-/// `Ok(None)` means no envelope: a single discriminator, or any non-constant
-/// one in the chain. Those events keep their existing meaning and stay
-/// matchable from `Program data:` log lines, which carry no envelope.
-///
-/// `Err` is reserved for chains that look enveloped but cannot be honored, so
-/// an ambiguous IDL fails the build rather than parsing arbitrarily.
+/// Infer the CPI event envelope declared by a single event, if any. `Ok(None)`
+/// means none, so the event stays matchable from `Program data:` logs; `Err`
+/// is for chains that look enveloped but can't be honored.
 ///
 pub fn envelope_of(event: &codama_nodes::EventNode) -> Result<Option<CpiEventEnvelope>, String> {
     let mut constants = Vec::with_capacity(event.discriminators.len());
@@ -203,7 +238,10 @@ pub fn envelope_of(event: &codama_nodes::EventNode) -> Result<Option<CpiEventEnv
         let (offset, bytes) = &window[0];
         let (next_offset, _) = &window[1];
 
-        if offset + bytes.len() > *next_offset {
+        if offset
+            .checked_add(bytes.len())
+            .is_none_or(|end| end > *next_offset)
+        {
             return Err(format!(
                 "event `{}` has overlapping discriminators: {} bytes at offset {offset} run past \
                  offset {next_offset}",
@@ -356,15 +394,9 @@ impl ProgramEnvelope {
 }
 
 ///
-/// The instruction an envelope tag would mask, if any.
-///
-/// The parser filters instructions whose data starts with the tag before it
-/// dispatches, so one sharing a prefix with the tag at offset 0 can never be
-/// parsed. Anchor's dispatcher checks the sentinel after every instruction, so
-/// this drops real instructions rather than being a theoretical clash.
-///
-/// A collision is either sequence prefixing the other at offset 0, equality
-/// included. Only offset 0 counts, because that is what `starts_with` compares.
+/// The instruction an envelope tag would mask, if any. The parser drops data
+/// starting with the tag before dispatch, so an instruction sharing that prefix
+/// at offset 0 (either way, equality included) can never be parsed.
 ///
 pub fn envelope_instruction_collision(
     discriminator: &[u8],
@@ -537,6 +569,24 @@ mod tests {
         assert_eq!(envelope_of(&event).expect("not an error"), None);
     }
 
+    /// Codama JSON can declare any offset; the overlap check must not overflow.
+    #[test]
+    fn envelope_of_rejects_an_offset_that_would_overflow() {
+        let event = event(
+            "huge",
+            &format!(
+                "{},{},{}",
+                constant("fe", 0),
+                constant("a1a2", usize::MAX - 1),
+                constant("b1", usize::MAX),
+            ),
+        );
+
+        let err = envelope_of(&event).expect_err("an overflowing offset must fail");
+
+        assert!(err.contains("overlapping"), "{err}");
+    }
+
     /// An event whose only discriminator is the program tag has none of its own.
     #[test]
     fn program_envelope_rejects_an_event_that_is_only_the_tag() {
@@ -651,18 +701,12 @@ mod tests {
     }
 
     ///
-    /// codama owns the origin invariant from 0.13 on, so the macro does not
-    /// re-check it.
-    ///
-    /// `origin` was a free-form `Option<String>` on codama 0.9, which meant a
-    /// generator-specific value deserialized and was then silently dropped. It is
-    /// a closed enum now, so the same IDL fails to parse and the message names
-    /// both the offending value and the accepted set. A wrapper check here would
-    /// only restate that, worse.
+    /// codama owns the `origin` invariant from 0.13 on: it is a closed enum, so a
+    /// bad value fails to parse with a message naming the accepted set.
     ///
     #[test]
     fn codama_rejects_an_unknown_program_origin() {
-        let err = load_codama_idl(idl_with_origin("custom")).expect_err("custom is not an origin");
+        let err = load_idl(idl_with_origin("custom")).expect_err("custom is not an origin");
 
         let message = err.to_string();
 
@@ -674,12 +718,31 @@ mod tests {
     /// The enum is lowercase-tagged, so a case variant is a different token.
     #[test]
     fn codama_rejects_a_case_variant_origin() {
-        assert!(load_codama_idl(idl_with_origin("Anchor")).is_err());
+        assert!(load_idl(idl_with_origin("Anchor")).is_err());
     }
 
     #[test]
     fn codama_accepts_the_two_real_origins() {
-        assert!(load_codama_idl(idl_with_origin("anchor")).is_ok());
-        assert!(load_codama_idl(idl_with_origin("shank")).is_ok());
+        assert!(load_idl(idl_with_origin("anchor")).is_ok());
+        assert!(load_idl(idl_with_origin("shank")).is_ok());
+    }
+
+    /// codama-nodes loads a root with no `kind`, and it loaded before Anchor
+    /// input existed, so it must not be sent to the Anchor converter.
+    #[test]
+    fn codama_json_without_kind_still_loads() {
+        let path = std::env::temp_dir().join("shipstern-codama-without-kind.json");
+
+        std::fs::write(
+            &path,
+            r#"{"standard":"codama","version":"1.6.0",
+               "program":{"kind":"programNode","name":"p",
+               "publicKey":"11111111111111111111111111111111","version":"0.1.0",
+               "accounts":[],"instructions":[],"definedTypes":[],"errors":[],"constants":[]},
+               "additionalPrograms":[]}"#,
+        )
+        .expect("write fixture");
+
+        assert!(load_idl(path).is_ok());
     }
 }
